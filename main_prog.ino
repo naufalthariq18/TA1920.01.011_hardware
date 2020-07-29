@@ -1,4 +1,4 @@
-/*  EL4092 TUGAS AKHIR II - TA1920.01.011
+/*  EL4091 TUGAS AKHIR II - TA1920.01.011
  *  PENGEMBANGAN METERAN DIGITAL BERBASIS APLIKASI MENGGUNAKAN LoRa
  *
  *  Anggota:
@@ -40,6 +40,29 @@ TaskHandle_t xScanKeypad = NULL;
 #define SCRTCD 3159
 #define SCRTRC 428954425
 
+/* DEKLARASI STRUKTUR DATA PENGOLAHAN DATA DI EEPROM DAN PEMBUATAN PAYLOAD */
+union buffer2Byte {
+    byte buffer[2];
+    uint16_t number;
+};
+
+union buffer4Byte {
+    byte buffer[4];
+    unsigned long numberLong;
+    float numberFloat;
+};
+
+struct mockDateTime {
+    uint8_t day;
+    uint8_t month;
+    union buffer2Byte year;
+    uint8_t hour;
+    uint8_t minute;
+    uint8_t second;
+};
+
+union buffer4Byte convert;
+
 /* VARIABEL GLOBAL METERAN */
 float E_tot;                //  Penggunaan energi residensi terukur
 float E_all;                //  Alokasi energi untuk residensi
@@ -48,17 +71,28 @@ unsigned char isOn;         //  Penjelasan terdapat di fungsi changeMode()
 unsigned char R_stat;       //  Penjelasan terdapat di fungsi changeMode()
 bool isNearOver = 0;        //  Bernilai 1 jika 16 A < I < 20 A (arus residensi)
 bool isKeypadOn = 0;        //  Bernilai 1 jika terdapat masukan keypad dari user
-char *rcvd_data;            //  String received data dari MQTT
-byte opCode;                //  OPCODE yang akan dikirim ke server
-unsigned char n;            //  Kode n yang akan dikirim ke server
-unsigned char R;            //  Kode R yang akan dikirim ke server
-unsigned char first;        //  Byte-0 dalam payload
-char byteStreamCode[16];    //  Byte stream 16 byte untuk slot NFC pada payload
 char payload[37];           //  String payload yang akan dikirim/telah diterima (setelah enkripsi/dekrispi)
 unsigned long startTime0;   //  Waktu referensi pada pengukuran delay
 unsigned long startTime1;
 unsigned long startTimeReport;
 int counterLCD = 0;
+
+/* VARIABEL GLOBAL TERKAIT PENGIRIMAN DATA KE SERVER */
+byte opCode;                //  OPCODE yang akan dikirim ke server
+unsigned char n;            //  Kode n yang akan dikirim ke server
+unsigned char R;            //  Kode R yang akan dikirim ke server
+unsigned char first;        //  Byte-0 dalam payload
+char byteStreamCode[16];    //  Byte stream 16 byte untuk slot NFC pada payload
+
+/* VARIABEL GLOBAL TERKAIT PENERIMAAN DATA DARI SERVER */
+char *rcvd_data;            //  String received data dari MQTT
+byte opCode_rec;
+unsigned char n_rec;
+unsigned char R_rec;
+struct mockDateTime timeRec;
+union buffer4Byte E_tot_rec;
+union buffer4Byte E_all_rec;
+char byteStream_rec[16];
 
 
 /* VARIABEL TERKAIT TIMER INTERRUPT */
@@ -104,29 +138,6 @@ byte my_iv[N_BLOCK] = { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
 
 /* INISIALISASI NAMA HARI UNTUK RTC */
 char daysOfTheWeek[7][12] = {"Minggu", "Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu"};
-
-/* DEKLARASI STRUKTUR DATA PENGOLAHAN DATA DI EEPROM DAN PEMBUATAN PAYLOAD */
-union buffer2Byte {
-    byte buffer[2];
-    uint16_t number;
-};
-
-union buffer4Byte {
-    byte buffer[4];
-    unsigned long numberLong;
-    float numberFloat;
-};
-
-struct mockDateTime {
-    uint8_t day;
-    uint8_t month;
-    union buffer2Byte year;
-    uint8_t hour;
-    uint8_t minute;
-    uint8_t second;
-};
-
-union buffer4Byte convert;
 
 /* DEKLARASI KELAS UNTUK BERKOMUNIKASI DENGAN BERBAGAI MODUL */
 Adafruit_PN532 nfc(PN532_SCK, PN532_MISO, PN532_MOSI, PN532_SS);
@@ -182,7 +193,7 @@ void setup() {
      Serial.begin(115200);
      Serial2.begin(9600, SERIAL_8N1, 16, 17);
      while (!Serial);
-     Serial.printf("Serial Communication initialization succeeded!\n");
+     Serial.printf("Serial Communication initialization successful!\n");
 
      // if analog input pin 36 is unconnected, random analog
      // noise will cause the call to randomSeed() to generate
@@ -208,18 +219,18 @@ void setup() {
      // Setup Coding Rate:5(4/5),6(4/6),7(4/7),8(4/8)
      LoRa.setCodingRate4(5);
      LoRa.setSyncWord(0x34);
-     Serial.println("LoRa initialization succeeded!");
+     Serial.println("LoRa initialization successful!");
 
      /* Inisialisasi kondisi LCD */
      lcd.begin(21, 22);
      lcd.backlight();
-     Serial.printf("LCD initialization succeeded!\n");
+     Serial.printf("LCD initialization successful!\n");
 
      /* Inisialisasi konfigurasi keypad */
      Wire.begin();
      keypad.begin();
      keypad.setDebounceTime(50);
-     Serial.printf("Keypad initialization succeeded!\n");
+     Serial.printf("Keypad initialization successful!\n");
 
      /* Inisialisasi komunikasi dengan NFC */
      nfc.begin();
@@ -229,7 +240,7 @@ void setup() {
          while(1);
      }
      nfc.SAMConfig();
-     Serial.printf("NFC scanner initialization succeeded!\n");
+     Serial.printf("NFC scanner initialization successful!\n");
 
      /* Inisialisasi variabel global berdasarkan nilai pada EEPROM RTC */
      Serial.printf("Fetching starting parameters from EEPROM\n");
@@ -251,7 +262,7 @@ void setup() {
 
      /* Inisialisasi Magnetic Switch MC38 untuk Anti-Tampering */
      pinMode(magnetSensor, INPUT);
-     Serial.printf("Magnetic Sensor initialization succeeded!\n");
+     Serial.printf("Magnetic Sensor initialization successful!\n");
 
      /* Inisialisasi Relay Tegangan Tinggi (SSR-40DA) */
      pinMode(ssr, OUTPUT);
@@ -262,7 +273,7 @@ void setup() {
      } else {
          digitalWrite(ssr, LOW);
      }
-     Serial.printf("Solid State Relay initialization succeeded!\n");
+     Serial.printf("Solid State Relay initialization successful!\n");
 
      /* Inisialisasi RTC */
      if (! rtc.begin()) {
@@ -273,13 +284,13 @@ void setup() {
          Serial.println("RTC lost power, lets set the time!");
          rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
      }
-     Serial.printf("RTC initialization succeeded!\n");
+     Serial.printf("RTC initialization successful!\n");
 
      timer = timerBegin(0, 80, true);
      timerAttachInterrupt(timer, &onTimer, true);
      timerAlarmWrite(timer, 1000000, true);
      timerAlarmEnable(timer);
-     Serial.printf("Timer initialization succeeded!\n");
+     Serial.printf("Timer initialization successful!\n");
 
      /* DEFINISI TASK RTOS (Dokumentasi masing-masing task terdapat di Dokumentasi
         implementasi task) */
@@ -300,7 +311,7 @@ void setup() {
     ,  1
     ,  NULL
     ,  1);
-    Serial.printf("RTOS initialization succeeded!\n\n");
+    Serial.printf("RTOS initialization successful!\n\n");
 
     startTime0 = 0;
     startTime1 = 0;
@@ -355,6 +366,22 @@ void ScanNFC(void *pvParameters)
         /* Receive transmisi paket data dari server */
         LoRa.receive();
     }
+}
+
+/*  TASK: ScanNFC()
+ *  Handler pengolahan data dan konfigurasi meteran dari server
+ */
+void LoRaHandler(void *pvParameters) {
+
+    switch(opCode_rec) {
+        case 0x05  :   readTime();
+                        Serial.printf("Receiving [n,R] = [%u,%u] from server\n", n_rec, R_rec);
+                        changeMode((int) n_rec, (int) R_rec);
+                        break;
+        default :       break;
+    }
+
+    vTaskDelete(NULL);
 }
 
 /* Handler ketika interrupt terjadi (BUKAN ISR) */
@@ -1289,8 +1316,6 @@ void parsePayload() {
     if(sizeof(payload) > 36) {
         unsigned char first_rec = payload[0];
 
-        byte opCode_rec;
-        unsigned char n_rec, R_rec;
         R_rec = first_rec & 0x3;
         n_rec = (first_rec >> 2) & 0x3;
         opCode_rec = first_rec >> 4;
@@ -1300,7 +1325,6 @@ void parsePayload() {
             meterID_rec.buffer[i] = (byte) payload[1 + i];
         }
 
-        struct mockDateTime timeRec;
         timeRec.day = (uint8_t) payload[5];
         timeRec.month = (uint8_t) payload[6];
         timeRec.year.buffer[0] = (byte) payload[7];
@@ -1309,7 +1333,6 @@ void parsePayload() {
         timeRec.minute = (uint8_t) payload[10];
         timeRec.second = (uint8_t) payload[11];
 
-        union buffer4Byte E_tot_rec, E_all_rec;
         for(unsigned char i = 0; i < 4; i++) {
             E_tot_rec.buffer[i] = (byte) payload[12 + i];
         }
@@ -1317,9 +1340,8 @@ void parsePayload() {
             E_all_rec.buffer[i] = (byte) payload[16 + i];
         }
 
-        char nfcCode_rec[16];
         for(unsigned char i = 0; i < 16; i++) {
-            nfcCode_rec[i] = payload[20 + i];
+            byteStream_rec[i] = payload[20 + i];
         }
 
         // Printing payload components
@@ -1336,7 +1358,7 @@ void parsePayload() {
         // Serial.printf("Second\t\t\t= %u - ", timeRec.second); printHexChar(&(timeRec.second), sizeof(timeRec.second));
         // Serial.printf("Total Energy\t\t= %f - ", E_tot_rec.numberFloat); printHexChar(E_tot_rec.buffer, sizeof(E_tot_rec.buffer));
         // Serial.printf("Allocated Energy\t= %f - ", E_all_rec.numberFloat); printHexChar(E_all_rec.buffer, sizeof(E_all_rec.buffer));
-        // Serial.printf("NFC Code\t\t= "); printHexChar((byte *) nfcCode_rec, sizeof(nfcCode_rec));
+        // Serial.printf("NFC Code\t\t= "); printHexChar((byte *) byteStream_rec, sizeof(byteStream_rec));
 
         // Translating the parsed code
         // Serial.printf("----------------------------------------------\n");
@@ -1346,10 +1368,8 @@ void parsePayload() {
             switch(opCode_rec) {
                 case 0x00 : Serial.printf("Code: NULL - no state parameters will be changed\n");
                             break;
-                case 0x01 : Serial.printf("Invalid opcode, should be used for endpoint to server transmission!\n");
-                            break;
-                case 0x02 : Serial.printf("Invalid opcode, should be used for endpoint to server transmission!\n");
-                            break;
+                case 0x01 :
+                case 0x02 :
                 case 0x03 : Serial.printf("Invalid opcode, should be used for endpoint to server transmission!\n");
                             break;
                 case 0x04 : Serial.printf("Code: ACKNOWLEDGEMENT\n");
@@ -1361,21 +1381,16 @@ void parsePayload() {
                             Serial.printf("%02u-%02u-%04u}\n", timeRec.day, timeRec.month, timeRec.year.number);
                             break;
                 case 0x05 : Serial.printf("Code: PERUBAHAN STATUS METERAN (SERVER->METER)\n");
-                            // Serial.printf("CHECKPOINT 1\n");
-                            readTime();
-                            // Serial.printf("CHECKPOINT 2\n");
-                            Serial.printf("Receiving [n,R] = [%u,%u] from server\n", n_rec, R_rec);
-                            // Serial.printf("CHECKPOINT 3\n");
-                            changeMode((int) n_rec, (int) R_rec);
-                            // Serial.printf("CHECKPOINT 4\n");
-                            // Serial.printf("Received parameters:\n");
-                            // Serial.printf("Opcode\t\t\t= "); printHexChar(&opCode_rec, sizeof(opCode_rec));
-                            // Serial.printf("n\t\t\t= %u\n", n_rec);
-                            // Serial.printf("R\t\t\t= %u\n", R_rec);
-                            // Serial.printf("Meter ID\t\t= %lu\n", meterID_rec.numberLong);
-                            // Serial.printf("Time\t\t\t= ");
-                            // Serial.printf("{%02u:%02u:%02u, ", timeRec.hour, timeRec.minute, timeRec.second);
-                            // Serial.printf("%02u-%02u-%04u}\n", timeRec.day, timeRec.month, timeRec.year.number);
+                            // Pembuatan task baru
+                            xTaskCreatePinnedToCore(
+                            LoRaHandler
+                            ,  "LoRa Handler"
+                            ,  8192
+                            ,  NULL
+                            ,  2
+                            ,  NULL
+                            ,  1);
+
                             break;
                 case 0x06 : Serial.printf("Code: PRIVATE KEY CHANGE (SERVER->METER)\n");
                             Serial.printf("Received parameters:\n");
@@ -1384,7 +1399,7 @@ void parsePayload() {
                             Serial.printf("Time\t\t\t= ");
                             Serial.printf("{%02u:%02u:%02u, ", timeRec.hour, timeRec.minute, timeRec.second);
                             Serial.printf("%02u-%02u-%04u}\n", timeRec.day, timeRec.month, timeRec.year.number);
-                            Serial.printf("New Key\t\t= "); printHexChar((byte *) nfcCode_rec, sizeof(nfcCode_rec));
+                            Serial.printf("New Key\t\t= "); printHexChar((byte *) byteStream_rec, sizeof(byteStream_rec));
                             break;
                 case 0x07 : Serial.printf("Code: TRIGGER PELAPORAN KONSUMSI ENERGI (SERVER->METER)\n");
                             Serial.printf("Received parameters:\n");
