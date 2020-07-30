@@ -249,6 +249,14 @@ void setup() {
      isOn = (unsigned char) (b & 4) >> 2;
      R_stat = (unsigned char) b & 3;
 
+     // Exceptions
+     if(isOn && R_stat != 0 && R_stat != 1) {
+         isOn = 0;
+         R_stat = 0;
+         overwriteEEPROM(0, isOn, 2);
+         overwriteEEPROM(0, R_stat, 3);
+     }
+
      for(unsigned int i = 0; i < 4; i++) {
          convert.buffer[i] = i2c_eeprom_read_byte(0x57, i + 1);
      }
@@ -337,15 +345,13 @@ void ScanKeypad(void *pvParameters)
             interruptHandler();
         }
 
-        if((millis() - startTime0) > 500) {
-            // Serial.printf("Delay from finishing LCD to starting keypad: %lu ms\n", millis() - timeForLCD);
-            // timeForLCD = millis();
-            receiveSignal();
-            // Serial.printf("Keypad screened in: %lu ms\n", millis() - timeForLCD);
-            // timeForLCD = millis();
+        // if((millis() - startTime0) > 500) {
+        // }
+        // startTime0 = millis();
+        receiveSignal();
 
-            startTime0 = millis();
-        }
+
+        vTaskDelay(300);
     }
 }
 
@@ -358,28 +364,40 @@ void ScanNFC(void *pvParameters)
 
     for (;;)
     {
-        if((millis() - startTime1) > 750) {
-            receiveNFC();
-            startTime1 = millis();
-        }
+        // if((millis() - startTime1) > 500) {
+        // }
+        receiveNFC();
+        // startTime1 = millis();
 
         /* Receive transmisi paket data dari server */
         LoRa.receive();
+
+        vTaskDelay(700);
     }
 }
 
-/*  TASK: ScanNFC()
+/*  TASK: LoRaHandlerRx()
  *  Handler pengolahan data dan konfigurasi meteran dari server
  */
-void LoRaHandler(void *pvParameters) {
-
+void LoRaHandlerRx(void *pvParameters) {
     switch(opCode_rec) {
-        case 0x05  :   readTime();
+        case 0x05  :    readTime();
                         Serial.printf("Receiving [n,R] = [%u,%u] from server\n", n_rec, R_rec);
                         changeMode((int) n_rec, (int) R_rec);
                         break;
         default :       break;
     }
+
+    vTaskDelete(NULL);
+}
+
+/*  TASK: CheckMeter()
+ *  Pengecekan rutin meteran.
+ */
+void CheckMeter(void *pvParameters) {
+
+    checkCondition();
+    reportEnergy();
 
     vTaskDelete(NULL);
 }
@@ -390,8 +408,14 @@ void interruptHandler() {
     interruptCounter--;
     portEXIT_CRITICAL(&timerMux);
 
-    checkCondition();
-    reportEnergy();
+    xTaskCreatePinnedToCore(
+    CheckMeter
+    ,  "Check Meter"
+    ,  8192
+    ,  NULL
+    ,  2
+    ,  NULL
+    ,  0);
 }
 
 /*  checkCondition()
@@ -507,8 +531,8 @@ void receiveSignal() {
     char keyEntered = keypad.getKey();
     if(keyEntered != NO_KEY && keyEntered == 'A') {
          updatePulsa();
-    } else if(keyEntered != NO_KEY && keyEntered == 'D') {
-         statusPrompt();
+    // } else if(keyEntered != NO_KEY && keyEntered == 'D') {
+    //      statusPrompt();
     } else if(keyEntered != NO_KEY && keyEntered == '#') {
         if(isTampered) {
             verifyRecoveryCode();
@@ -810,79 +834,79 @@ void verifyCode() {
  *  NOTES: HANYA DIGUNAKAN UNTUK DEBUGGING (dengan keypad)
  */
 void statusPrompt() {
-    /* SIMULASI SINYAL SERVER MENGGUNAKAN KEYPAD */
-    isKeypadOn = 1;
-    lcd.clear();
-    lcd.setCursor(0,0);
-    lcd.print("[n,R] = ");
-    Serial.printf("[n,R] = ");
-
-    char statCode[2];
-    char kpad;
-    int i = 0;
-
-    while((kpad = keypad.getKey()) == NO_KEY) {
-        if(interruptCounter > 0) {
-            interruptHandler();
-        } else {
-            vTaskDelay(1);
-        }
-    }
-    while(keypad.getKey() != NO_KEY) {
-        if(interruptCounter > 0) {
-            interruptHandler();
-        } else {
-            vTaskDelay(1);
-        }
-    }
-    while(kpad != 'D') {
-        if(!(kpad == 'A' ||kpad == 'B' || kpad == 'C' || kpad == '#' || kpad == '*') && i < 2) {
-            statCode[i] = kpad - 48;
-            setNumLCD(8 + i, 0, statCode[i]);
-            i++;
-            Serial.printf("%d", kpad - 48);
-        }
-
-        while((kpad = keypad.getKey()) == NO_KEY) {
-            if(interruptCounter > 0) {
-                interruptHandler();
-            } else {
-                vTaskDelay(1);
-            }
-        }
-        while(keypad.getKey() != NO_KEY) {
-            if(interruptCounter > 0) {
-                interruptHandler();
-            } else {
-                vTaskDelay(1);
-            }
-        }
-    }
-    Serial.printf("\n");
-    while(i < 2) {
-        statCode[i] = 5;
-        i++;
-    }
-    lcd.setCursor(0,1);
-
-    /* HANDLER PERUBAHAN STATUS METERAN (TENTATIF) */
-    readTime();
-    if(!(statCode[0] == 5 || statCode[1] == 5)) {
-        Serial.printf("Receiving [n,R] = [%d,%d] from server\n", statCode[0], statCode[1]);
-        lcd.print("Status received!");
-        changeMode(statCode[0], statCode[1]);
-    } else {
-        Serial.printf("Failed to receive [n,R] code from server\n");
-        lcd.print("Status failed!");
-    }
-
-    unsigned long currentTime = millis();
-    while((millis() - currentTime) < 3000) {
-        if(interruptCounter > 0) {
-            interruptHandler();
-        }
-    }
-    isKeypadOn = 0;
+    // /* SIMULASI SINYAL SERVER MENGGUNAKAN KEYPAD */
+    // isKeypadOn = 1;
+    // lcd.clear();
+    // lcd.setCursor(0,0);
+    // lcd.print("[n,R] = ");
+    // Serial.printf("[n,R] = ");
+    //
+    // char statCode[2];
+    // char kpad;
+    // int i = 0;
+    //
+    // while((kpad = keypad.getKey()) == NO_KEY) {
+    //     if(interruptCounter > 0) {
+    //         interruptHandler();
+    //     } else {
+    //         vTaskDelay(1);
+    //     }
+    // }
+    // while(keypad.getKey() != NO_KEY) {
+    //     if(interruptCounter > 0) {
+    //         interruptHandler();
+    //     } else {
+    //         vTaskDelay(1);
+    //     }
+    // }
+    // while(kpad != 'D') {
+    //     if(!(kpad == 'A' ||kpad == 'B' || kpad == 'C' || kpad == '#' || kpad == '*') && i < 2) {
+    //         statCode[i] = kpad - 48;
+    //         setNumLCD(8 + i, 0, statCode[i]);
+    //         i++;
+    //         Serial.printf("%d", kpad - 48);
+    //     }
+    //
+    //     while((kpad = keypad.getKey()) == NO_KEY) {
+    //         if(interruptCounter > 0) {
+    //             interruptHandler();
+    //         } else {
+    //             vTaskDelay(1);
+    //         }
+    //     }
+    //     while(keypad.getKey() != NO_KEY) {
+    //         if(interruptCounter > 0) {
+    //             interruptHandler();
+    //         } else {
+    //             vTaskDelay(1);
+    //         }
+    //     }
+    // }
+    // Serial.printf("\n");
+    // while(i < 2) {
+    //     statCode[i] = 5;
+    //     i++;
+    // }
+    // lcd.setCursor(0,1);
+    //
+    // /* HANDLER PERUBAHAN STATUS METERAN (TENTATIF) */
+    // readTime();
+    // if(!(statCode[0] == 5 || statCode[1] == 5)) {
+    //     Serial.printf("Receiving [n,R] = [%d,%d] from server\n", statCode[0], statCode[1]);
+    //     lcd.print("Status received!");
+    //     changeMode(statCode[0], statCode[1]);
+    // } else {
+    //     Serial.printf("Failed to receive [n,R] code from server\n");
+    //     lcd.print("Status failed!");
+    // }
+    //
+    // unsigned long currentTime = millis();
+    // while((millis() - currentTime) < 3000) {
+    //     if(interruptCounter > 0) {
+    //         interruptHandler();
+    //     }
+    // }
+    // isKeypadOn = 0;
 }
 
 /*  readNFC()
@@ -1383,8 +1407,8 @@ void parsePayload() {
                 case 0x05 : Serial.printf("Code: PERUBAHAN STATUS METERAN (SERVER->METER)\n");
                             // Pembuatan task baru
                             xTaskCreatePinnedToCore(
-                            LoRaHandler
-                            ,  "LoRa Handler"
+                            LoRaHandlerRx
+                            ,  "LoRa Handler Receive"
                             ,  8192
                             ,  NULL
                             ,  2
