@@ -26,8 +26,10 @@
 #include <LoRa.h>
 #include "mbedtls/md.h"
 
-/* KONFIGURASI RTOS */
+/* KONFIGURASI TASK HANDLE RTOS */
 TaskHandle_t xScanKeypad = NULL;
+TaskHandle_t xLoRaHandlerTx = NULL;
+TaskHandle_t xLoRaHandlerRx = NULL;
 
 
 /* PENDEFINISIAN PIN UNTUK KOMUNIKASI SPI */
@@ -64,25 +66,25 @@ struct mockDateTime {
 union buffer4Byte convert;
 
 /* VARIABEL GLOBAL METERAN */
-float E_tot;                //  Penggunaan energi residensi terukur
-float E_all;                //  Alokasi energi untuk residensi
+float E_tot;                    //  Penggunaan energi residensi terukur
+float E_all;                    //  Alokasi energi untuk residensi
 unsigned char isTampered = 0;   //  Bernilai 1 jika meteran ter-tampered (magnetic switch terbuka)
-unsigned char isOn;         //  Penjelasan terdapat di fungsi changeMode()
-unsigned char R_stat;       //  Penjelasan terdapat di fungsi changeMode()
-bool isNearOver = 0;        //  Bernilai 1 jika 16 A < I < 20 A (arus residensi)
-bool isKeypadOn = 0;        //  Bernilai 1 jika terdapat masukan keypad dari user
-char payload[37];           //  String payload yang akan dikirim/telah diterima (setelah enkripsi/dekrispi)
-unsigned long startTime0;   //  Waktu referensi pada pengukuran delay
-unsigned long startTime1;
-unsigned long startTimeReport;
-int counterLCD = 0;
+unsigned char isOn;             //  Penjelasan terdapat di fungsi changeMode()
+unsigned char R_stat;           //  Penjelasan terdapat di fungsi changeMode()
+bool isNearOver = 0;            //  Bernilai 1 jika 16 A < I < 20 A (arus residensi)
+bool isKeypadOn = 0;            //  Bernilai 1 jika terdapat masukan keypad dari user
+char payload[37];               //  String payload yang akan dikirim/telah diterima (setelah enkripsi/dekrispi)
+unsigned long startTimeReport;  //  Digunakan untuk perhitungan interval waktu antara pengukuran daya/tegangan/arus
+bool isTimeSync = 0;
+int counterTimeSync = 0;
+bool isFromHandlerRx = 0;
 
 /* VARIABEL GLOBAL TERKAIT PENGIRIMAN DATA KE SERVER */
-byte opCode;                //  OPCODE yang akan dikirim ke server
-unsigned char n;            //  Kode n yang akan dikirim ke server
-unsigned char R;            //  Kode R yang akan dikirim ke server
-unsigned char first;        //  Byte-0 dalam payload
-char byteStreamCode[16];    //  Byte stream 16 byte untuk slot NFC pada payload
+byte opCode_send;           //  OPCODE yang akan dikirim ke server
+unsigned char n_send;       //  Kode n yang akan dikirim ke server
+unsigned char R_send;       //  Kode R yang akan dikirim ke server
+unsigned char first_send;   //  Byte-0 yang dibuat dari opcode, n, dan R
+char byteStream_send[16];   //  Byte stream 16 byte untuk slot NFC pada payload
 
 /* VARIABEL GLOBAL TERKAIT PENERIMAAN DATA DARI SERVER */
 char *rcvd_data;            //  String received data dari MQTT
@@ -182,6 +184,9 @@ void printHexChar(const byte *data, const uint32_t numBytes);
 uint8_t getrnd();
 void gen_iv(byte *iv);
 void setup_aes();
+void envelop_data();
+void encrypt_payload(char *msg, int b64payloadlen);
+void sendData();
 
 // unsigned long timeForLCD = 0;
 
@@ -253,19 +258,27 @@ void setup() {
      if(isOn && R_stat != 0 && R_stat != 1) {
          isOn = 0;
          R_stat = 0;
-         overwriteEEPROM(0, isOn, 2);
-         overwriteEEPROM(0, R_stat, 3);
+         overwriteEEPROM(0, isOn, R_stat, 2);
+     }
+
+     for(unsigned int i = 0; i < 4; i++) {
+         convert.buffer[i] = i2c_eeprom_read_byte(0x57, i + 5);
+     }
+     E_all = convert.numberFloat;
+     if(E_all < 0) {
+         E_all = 0;
+         overwriteEEPROM(E_all, 0, 0, 1);
      }
 
      for(unsigned int i = 0; i < 4; i++) {
          convert.buffer[i] = i2c_eeprom_read_byte(0x57, i + 1);
      }
      E_tot = convert.numberFloat;
-
-     for(unsigned int i = 0; i < 4; i++) {
-         convert.buffer[i] = i2c_eeprom_read_byte(0x57, i + 5);
+     if(E_tot > E_all) {
+         E_tot = E_all;
+         overwriteEEPROM(E_tot, 0, 0, 0);
      }
-     E_all = convert.numberFloat;
+
      Serial.printf("Starting parameters are already set!\n");
 
      /* Inisialisasi Magnetic Switch MC38 untuk Anti-Tampering */
@@ -289,8 +302,17 @@ void setup() {
          while (1);
      }
      if (rtc.lostPower()) {
-         Serial.println("RTC lost power, lets set the time!");
+         Serial.println("RTC lost power. Readjusting the time.");
          rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+     } else {
+         DateTime now = rtc.now();
+         Serial.printf("{%02d:%02d:%02d, ", now.hour(), now.minute(), now.second());
+         Serial.printf("%02d-%02d-20%02d}\n", now.day(), now.month(), now.year() - 2000);
+
+         bool timeCondition = now.hour() < 24 && now.minute() < 60 && now.second() < 60 && now.day() < 32 && now.month() < 13;
+         if(!timeCondition) {
+             Serial.println("RTC is incorrect, recalibration with server time is needed.\n");
+         }
      }
      Serial.printf("RTC initialization successful!\n");
 
@@ -299,6 +321,19 @@ void setup() {
      timerAlarmWrite(timer, 1000000, true);
      timerAlarmEnable(timer);
      Serial.printf("Timer initialization successful!\n");
+
+     /* INISIALISASI GENERATOR PAYLOAD */
+     opCode_send = 0;
+     first_send = 0;
+     n_send = 0;
+     R_send = 0;
+     for(char i = 0; i < 16; i += 4) {
+         byteStream_send[i] = 0;
+         byteStream_send[i + 1] = 0;
+         byteStream_send[i + 2] = 0;
+         byteStream_send[i + 3] = 0;
+     }
+     Serial.printf("Payload Generator initialization successful!\n");
 
      /* DEFINISI TASK RTOS (Dokumentasi masing-masing task terdapat di Dokumentasi
         implementasi task) */
@@ -319,10 +354,17 @@ void setup() {
     ,  1
     ,  NULL
     ,  1);
+
+    xTaskCreatePinnedToCore(
+    ScanLoRa
+    ,  "Scan LoRa"
+    ,  8192
+    ,  NULL
+    ,  1
+    ,  NULL
+    ,  1);
     Serial.printf("RTOS initialization successful!\n\n");
 
-    startTime0 = 0;
-    startTime1 = 0;
     Serial.printf("Meter is set!\n\n");
 
     /* Attempt untuk receive paket data dari server */
@@ -345,11 +387,7 @@ void ScanKeypad(void *pvParameters)
             interruptHandler();
         }
 
-        // if((millis() - startTime0) > 500) {
-        // }
-        // startTime0 = millis();
         receiveSignal();
-
 
         vTaskDelay(300);
     }
@@ -364,15 +402,24 @@ void ScanNFC(void *pvParameters)
 
     for (;;)
     {
-        // if((millis() - startTime1) > 500) {
-        // }
         receiveNFC();
-        // startTime1 = millis();
-
-        /* Receive transmisi paket data dari server */
-        LoRa.receive();
 
         vTaskDelay(700);
+    }
+}
+
+/*  TASK: ScanLoRa()
+ *  Fungsi ini terdiri dari scan LoRa
+ */
+void ScanLoRa(void *pvParameters)
+{
+    (void) pvParameters;
+
+    for (;;)
+    {
+        LoRa.receive();
+
+        vTaskDelay(500);
     }
 }
 
@@ -380,13 +427,115 @@ void ScanNFC(void *pvParameters)
  *  Handler pengolahan data dan konfigurasi meteran dari server
  */
 void LoRaHandlerRx(void *pvParameters) {
+    Serial.printf("Starting LoRaHandlerRx procedure.\n");
+
+    if(!isTimeSync) {
+        Serial.printf("Recalibrating time with server time.\n");
+        rtc.adjust(DateTime(timeRec.year.number, timeRec.month, timeRec.day, timeRec.hour, timeRec.minute, timeRec.second));
+        Serial.printf("Time recalibrated: ");
+        Serial.printf("{%02d:%02d:%02d, ", timeRec.hour, timeRec.minute, timeRec.second);
+        Serial.printf("%02d-%02d-%04d}\n", timeRec.day, timeRec.month, timeRec.year.number);
+        isTimeSync = 1;
+    }
+
     switch(opCode_rec) {
         case 0x05  :    readTime();
                         Serial.printf("Receiving [n,R] = [%u,%u] from server\n", n_rec, R_rec);
+                        isFromHandlerRx = 1;
                         changeMode((int) n_rec, (int) R_rec);
+                        isFromHandlerRx = 0;
                         break;
         default :       break;
     }
+
+    opCode_send = 4;
+    Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
+    xTaskCreatePinnedToCore(
+    LoRaHandlerTx
+    ,  "LoRa Handler Transmit"
+    ,  8192
+    ,  NULL
+    ,  3
+    ,  &xLoRaHandlerTx
+    ,  xPortGetCoreID());
+
+    Serial.printf("Ending LoRaHandlerRx procedure.\n");
+    vTaskDelete(NULL);
+}
+
+/*  TASK: LoRaHandlerTx()
+ *  Handler pembuatan payload dan pengiriman ke server
+ */
+void LoRaHandlerTx(void *pvParameters) {
+    Serial.printf("Starting LoRaHandlerTx procedure.\n");
+
+    DateTime now = rtc.now();
+
+    first_send = 0x00;
+    first_send |= opCode_send;
+    first_send = (first_send << 2) | n_send;
+    first_send = (first_send << 2) | R_send;
+    payload[0] = first_send;
+
+    union buffer4Byte meterID_send;
+    meterID_send.numberLong = (unsigned long) SCRTCD;
+    for(unsigned char i = 0; i < 4; i++) {
+        payload[1 + i] = (unsigned char) meterID_send.buffer[i];
+    }
+
+    payload[5] = (unsigned char) now.day();
+    payload[6] = (unsigned char) now.month();
+    union buffer2Byte year_send;
+    year_send.number = (uint16_t) now.year();
+    payload[7] = (unsigned char) year_send.buffer[0];
+    payload[8] = (unsigned char) year_send.buffer[1];
+    payload[9] = (unsigned char) now.hour();
+    payload[10] = (unsigned char) now.minute();
+    payload[11] = (unsigned char) now.second();
+
+    union buffer4Byte placeEnergy;
+    placeEnergy.numberFloat = E_tot;
+    for(unsigned char i = 0; i < 4; i++) {
+        payload[12 + i] = (unsigned char) placeEnergy.buffer[i];
+    }
+    placeEnergy.numberFloat = E_all;
+    for(unsigned char i = 0; i < 4; i++) {
+        payload[16 + i] = (unsigned char) placeEnergy.buffer[i];
+    }
+
+    for(unsigned char i = 0; i < 16; i++) {
+        payload[20 + i] = byteStream_send[i];
+    }
+
+    // Printing payload components
+    Serial.printf("Prepared payload components:\n");
+    Serial.printf("Opcode\t\t\t= "); printHexChar(&opCode_send, sizeof(opCode_send));
+    Serial.printf("n\t\t\t= %u - ", n_send); printHexChar(&n_send, sizeof(n_send));
+    Serial.printf("R\t\t\t= %u - ", R_send); printHexChar(&R_send, sizeof(R_send));
+    Serial.printf("Byte-0\t\t\t= "); printHexChar(&first_send, sizeof(first_send));
+    Serial.printf("Meter ID\t\t= %lu - ", meterID_send.numberLong); printHexChar(meterID_send.buffer, sizeof(meterID_send.buffer));
+    Serial.printf("Time\t\t\t= ");
+    Serial.printf("{%02u:%02u:%02u, ", now.hour(), now.minute(), now.second());
+    Serial.printf("%02u-%02u-%04u}\n", now.day(), now.month(), now.year());
+    Serial.printf("NFC Code\t\t= "); printHexChar((byte *) byteStream_send, sizeof(byteStream_send));
+
+    payload[36] = '\0';
+
+
+    Serial.printf("\nPREPARED PAYLOAD:\n"); printHexChar((byte *) payload, sizeof(payload));
+
+    if(sizeof(payload) == 37) {
+        Serial.printf("Starting data packet preparation.\n");
+        envelop_data();
+        Serial.printf("Data packet preparation finished. Sending data packet.\n");
+        sendData();
+    }
+
+    vTaskDelay(5000);
+    if(xLoRaHandlerRx) vTaskResume(xLoRaHandlerRx);
+
+    Serial.printf("Ending LoRaHandlerTx procedure.\n");
+
 
     vTaskDelete(NULL);
 }
@@ -430,9 +579,9 @@ void checkCondition() {
         if(isOn && E_tot > E_all) {
             changeMode(0,1);
             E_all = 0;
-            overwriteEEPROM(E_all, 1, 0);
+            overwriteEEPROM(E_all, 1, 1, 1);
             E_tot = 0;
-            overwriteEEPROM(E_tot, 0, 0);
+            overwriteEEPROM(E_tot, 0, 0, 0);
 
         }
     } else {
@@ -460,7 +609,7 @@ void reportEnergy() {
         if(!isnan(measuredP) && !isnan(measuredI) && measuredI < 40) {
             E_tot += measuredP * (float) (millis() - startTimeReport) / 1000;
             startTimeReport = millis();
-            overwriteEEPROM(E_tot, 0, 0);
+            overwriteEEPROM(E_tot, 0, 0, 0);
         }
         if(isnan(measuredI)) {
             measuredI = 0;
@@ -486,6 +635,18 @@ void reportEnergy() {
             readTime();
             Serial.printf("Sending [n,R] = [2,0] to server\n");
             /* Kirim kode [n,R] = [2,0] ke server */
+            opCode_send = 1;
+            n_send = 2;
+            R_send = 0;
+            Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
+            xTaskCreatePinnedToCore(
+            LoRaHandlerTx
+            ,  "LoRa Handler Transmit"
+            ,  8192
+            ,  NULL
+            ,  3
+            ,  &xLoRaHandlerTx
+            ,  xPortGetCoreID());
         }
     } else {
         isNearOver = 0;
@@ -512,13 +673,12 @@ void reportEnergy() {
         // Serial.printf("LCD written in: %lu ms\n", millis() - timeForLCD);
     }
 
-    // if(counterLCD > 30) {
-    //     lcd.backlight();
-    //     Serial.printf("Backlight reset!\n");
-    //     counterLCD = 0;
-    // } else {
-    //     counterLCD++;
-    // }
+    if(counterTimeSync > 3600) {
+        isTimeSync = 0;
+        counterTimeSync = 0;
+    } else {
+        counterTimeSync++;
+    }
 
 }
 
@@ -529,11 +689,12 @@ void reportEnergy() {
  */
 void receiveSignal() {
     char keyEntered = keypad.getKey();
-    if(keyEntered != NO_KEY && keyEntered == 'A') {
-         updatePulsa();
+    // if(keyEntered != NO_KEY && keyEntered == 'A') {
+    //      updatePulsa();
     // } else if(keyEntered != NO_KEY && keyEntered == 'D') {
     //      statusPrompt();
-    } else if(keyEntered != NO_KEY && keyEntered == '#') {
+    // } else
+    if(keyEntered != NO_KEY && keyEntered == '#') {
         if(isTampered) {
             verifyRecoveryCode();
         } else {
@@ -594,50 +755,132 @@ void setNumLCD(int row, int col, int num) {
 void changeMode(int n, int r) {
     if(!n && isOn == 1) {
         isOn = 0;
-        // overwriteEEPROM(0, (isTampered << 1) | (isOn & 1), 2);
-        overwriteEEPROM(0, isOn, 2);
         R_stat = r;
-        overwriteEEPROM(0, R_stat, 3);
+        // overwriteEEPROM(0, (isTampered << 1) | (isOn & 1), 2);
+        overwriteEEPROM(0, isOn, R_stat, 2);
         digitalWrite(ssr, LOW);
         readTime();
         Serial.printf("Sending [n,R] = [0,%d] to server\n", r);
-        /* Kirim kode [n,R] = [0,R] ke server */
+
+        opCode_send = 1;
+        n_send = 0;
+        R_send = (unsigned char) r;
+        Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
+        xTaskCreatePinnedToCore(
+        LoRaHandlerTx
+        ,  "LoRa Handler Transmit"
+        ,  8192
+        ,  NULL
+        ,  3
+        ,  &xLoRaHandlerTx
+        ,  xPortGetCoreID());
+        if(isFromHandlerRx) vTaskSuspend(NULL);
     } else if(n == 1 && !isOn) {
         bool statement = (!r && R_stat != 3) || (r == 1);
         if(statement) {
               isOn = 1;
               // overwriteEEPROM(0, (isTampered << 1) | (isOn & 1), 2);
-              overwriteEEPROM(0, isOn, 2);
               R_stat = r;
-              overwriteEEPROM(0, R_stat, 3);
+              overwriteEEPROM(0, isOn, R_stat, 2);
               if(!isTampered) {
                   digitalWrite(ssr, HIGH);
                   startTimeReport = millis();
               }
               readTime();
               Serial.printf("Sending [n,R] = [1,%d] to server\n", r);
+
               /* Kirim kode [n,R] = [1,R] ke server */
+              opCode_send = 1;
+              n_send = 1;
+              R_send = (unsigned char) r;
+
+              Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
+              xTaskCreatePinnedToCore(
+              LoRaHandlerTx
+              ,  "LoRa Handler Transmit"
+              ,  8192
+              ,  NULL
+              ,  3
+              ,  &xLoRaHandlerTx
+              ,  xPortGetCoreID());
+              if(isFromHandlerRx) vTaskSuspend(NULL);
         }
     } else if(!n && !isOn) {
         if(r == 1 || r == 3) {
             R_stat = r;
-            overwriteEEPROM(0, R_stat, 3);
+            overwriteEEPROM(0, isOn, R_stat, 2);
             readTime();
             Serial.printf("Sending [n,R] = [0,%d] to server\n", r);
             /* Kirim kode [n,R] = [0,R] ke server */
+            opCode_send = 1;
+            n_send = 0;
+            R_send = (unsigned char) r;
+            Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
+            xTaskCreatePinnedToCore(
+            LoRaHandlerTx
+            ,  "LoRa Handler Transmit"
+            ,  8192
+            ,  NULL
+            ,  3
+            ,  &xLoRaHandlerTx
+            ,  xPortGetCoreID());
+            if(isFromHandlerRx) vTaskSuspend(NULL);
         } else if(!r) {
             if(R_stat == 3) {
                 readTime();
                 Serial.printf("Sending [n,R] = [0,%d] to server\n", r);
                 /* Kirim kode [n,R] = [0,R] ke server */
+                opCode_send = 1;
+                n_send = 0;
+                R_send = (unsigned char) r;
+                Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
+                xTaskCreatePinnedToCore(
+                LoRaHandlerTx
+                ,  "LoRa Handler Transmit"
+                ,  8192
+                ,  NULL
+                ,  3
+                ,  &xLoRaHandlerTx
+                ,  xPortGetCoreID());
+                if(isFromHandlerRx) vTaskSuspend(NULL);
             } else {
                 R_stat = r;
-                overwriteEEPROM(0, R_stat, 3);
+                overwriteEEPROM(0, isOn, R_stat, 2);
                 readTime();
                 Serial.printf("Sending [n,R] = [0,%d] to server\n", r);
                 /* Kirim kode [n,R] = [0,R] ke server */
+                opCode_send = 1;
+                n_send = 0;
+                R_send = (unsigned char) r;
+                Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
+                xTaskCreatePinnedToCore(
+                LoRaHandlerTx
+                ,  "LoRa Handler Transmit"
+                ,  8192
+                ,  NULL
+                ,  3
+                ,  &xLoRaHandlerTx
+                ,  xPortGetCoreID());
+                if(isFromHandlerRx) vTaskSuspend(NULL);
             }
         }
+    } else if(isFromHandlerRx) {
+        // Jika menyala dan perintahnya tetap menyala
+        Serial.printf("Sending [n,R] = [1,%d] to server\n", r);
+        /* Kirim kode [n,R] = [1,R] ke server */
+        opCode_send = 1;
+        n_send = 1;
+        R_send = (unsigned char) r;
+        Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
+        xTaskCreatePinnedToCore(
+        LoRaHandlerTx
+        ,  "LoRa Handler Transmit"
+        ,  8192
+        ,  NULL
+        ,  3
+        ,  &xLoRaHandlerTx
+        ,  xPortGetCoreID());
+        vTaskSuspend(NULL);
     }
 }
 
@@ -706,9 +949,9 @@ void updatePulsa() {
     }
     /* DN: something weird happened here */
     E_all = E_all_updated;
-    overwriteEEPROM(E_all, 0, 1);
+    overwriteEEPROM(E_all, 0, 1, 1);
     E_tot = 0;
-    overwriteEEPROM(E_tot, 0, 0);
+    overwriteEEPROM(E_tot, 0, 0, 0);
 
     isKeypadOn = 0;
 }
@@ -807,7 +1050,7 @@ void verifyCode() {
                 case 3  : E_all += 50000; break;
                 case 4  : E_all += 100000; break;
             }
-            overwriteEEPROM(E_all, 0, 1);
+            overwriteEEPROM(E_all, 0, 1, 1);
             isMatch = 1;
         }
         ref += SCRTCD;
@@ -955,11 +1198,22 @@ void readNFC(uint8_t uid[], uint8_t uidLength) {
                 }
                 Serial.printf(" to server.\n");
 
+                opCode_send = 4;
+                Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
+                xTaskCreatePinnedToCore(
+                LoRaHandlerTx
+                ,  "LoRa Handler Transmit"
+                ,  8192
+                ,  NULL
+                ,  3
+                ,  &xLoRaHandlerTx
+                ,  xPortGetCoreID());
+
                 /* ADD ENERGY ACCORDING TO THE CARD, SEND TO SERVER */
 
                 /* THIS IS NOT SUPPOSED TO HAPPEN, WRITTEN HERE FOR EASIER HARDWARE DEBUGGING */
                 E_all += 100000;
-                overwriteEEPROM(E_all, 0, 1);
+                overwriteEEPROM(E_all, 0, 1, 1);
                 changeMode(1, 0);
             } else {
                 Serial.printf("Cannot read NFC data contents.\n");
@@ -985,8 +1239,15 @@ void readNFC(uint8_t uid[], uint8_t uidLength) {
 void readTime() {
     DateTime now = rtc.now();
 
+    bool timeCondition = now.hour() < 24 && now.minute() < 60 && now.second() < 60 && now.day() < 32 && now.month() < 13;
+    if(!timeCondition) {
+        Serial.println("RTC is incorrect, recalibration with server time is needed.\n");
+        isTimeSync = 0;
+        counterTimeSync = 0;
+    }
+
     Serial.printf("{%02d:%02d:%02d, ", now.hour(), now.minute(), now.second());
-    Serial.printf("%02d-%02d-20%02d} ", now.day(), now.month(), now.year() - 2000);
+    Serial.printf("%02d-%02d-%04d} ", now.day(), now.month(), now.year());
 }
 
 /*  overwriteEEPROM()
@@ -994,14 +1255,14 @@ void readTime() {
  *  nilai yang tersimpan di EEPROM.
  *  INPUT:
  *  - num: floating point (E_tot atau E_all) yang hendak disimpan di EEPROM
- *  - cond: isOn atau R_stat yang hendak disimpan di EEPROM
+ *  - isOn_write: isOn yang hendak disimpan di EEPROM
+ *  - R_stat_write: R_stat yang hendak disimpan di EEPROM
  *  - mode: Terdapat 4 mode.
- *          0: E_tot hendak disimpan, cond bersifat don't care
- *          1: E_all hendak disimpan, cond bersifat don't care
- *          2: isOn hendak disimpan, num bersifat don't care
- *          3: R_stat hendak disimpan, num bersifat don't care
+ *          0: E_tot hendak disimpan, isOn dan R_stat bersifat don't care
+ *          1: E_all hendak disimpan, isOn dan R_stat bersifat don't care
+ *          2: isOn dan R_stat hendak disimpan, num bersifat don't care
  */
-void overwriteEEPROM(float num, unsigned char cond, int mode) {
+void overwriteEEPROM(float num, unsigned char isOn_write, unsigned char R_stat_write, int mode) {
     byte b;
     switch (mode) {
         case 0:
@@ -1026,16 +1287,11 @@ void overwriteEEPROM(float num, unsigned char cond, int mode) {
                 break;
         case 2:
                 b = i2c_eeprom_read_byte(0x57, 0);
-                if(cond != ((b & 12) >> 2)) {
-                    b = (cond << 2) | (b & 3);
-                    i2c_eeprom_write_byte(0x57, 0, b);
-                }
-                break;
-        case 3:
-                b = i2c_eeprom_read_byte(0x57, 0);
-                if(cond != (b & 3)) {
-                    b = cond | (b & 12);
-                    i2c_eeprom_write_byte(0x57, 0, b);
+                byte writeByte = 0x00;
+                writeByte |= isOn_write;
+                writeByte = (writeByte << 2) | R_stat_write;
+                if(writeByte != b) {
+                    i2c_eeprom_write_byte(0x57, 0, writeByte);
                 }
                 break;
     }
@@ -1127,12 +1383,40 @@ void i2c_eeprom_write_page(int deviceaddress, unsigned int eeaddresspage, byte* 
         Serial.printf("Meter tampered!\n");
         readTime();
         Serial.printf("Sending [n,R] = [3,1] to server\n");
+
+        opCode_send = 1;
+        n_send = 3;
+        R_send = 1;
+
+        Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
+        xTaskCreatePinnedToCore(
+        LoRaHandlerTx
+        ,  "LoRa Handler Transmit"
+        ,  8192
+        ,  NULL
+        ,  3
+        ,  &xLoRaHandlerTx
+        ,  xPortGetCoreID());
     } else {
         isTampered = 0;
         // overwriteEEPROM(0, (isTampered << 1) | (isOn & 1), 2);
         Serial.printf("Meter recovered!\n");
         readTime();
         Serial.printf("Sending [n,R] = [3,0] to server\n");
+
+        opCode_send = 1;
+        n_send = 3;
+        R_send = 0;
+
+        Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
+        xTaskCreatePinnedToCore(
+        LoRaHandlerTx
+        ,  "LoRa Handler Transmit"
+        ,  8192
+        ,  NULL
+        ,  3
+        ,  &xLoRaHandlerTx
+        ,  xPortGetCoreID());
 
         int state = digitalRead(magnetSensor);
         if(isOn && !state) {
@@ -1405,6 +1689,15 @@ void parsePayload() {
                             Serial.printf("%02u-%02u-%04u}\n", timeRec.day, timeRec.month, timeRec.year.number);
                             break;
                 case 0x05 : Serial.printf("Code: PERUBAHAN STATUS METERAN (SERVER->METER)\n");
+                            Serial.printf("Received parameters:\n");
+                            Serial.printf("Opcode\t\t\t= "); printHexChar(&opCode_rec, sizeof(opCode_rec));
+                            Serial.printf("n\t\t\t= %u\n", n_rec);
+                            Serial.printf("R\t\t\t= %u\n", R_rec);
+                            Serial.printf("Meter ID\t\t= %lu\n", meterID_rec.numberLong);
+                            Serial.printf("Time\t\t\t= ");
+                            Serial.printf("{%02u:%02u:%02u, ", timeRec.hour, timeRec.minute, timeRec.second);
+                            Serial.printf("%02u-%02u-%04u}\n", timeRec.day, timeRec.month, timeRec.year.number);
+                            Serial.print("Initializing LoRaHandlerRx at core "); Serial.println(xPortGetCoreID());
                             // Pembuatan task baru
                             xTaskCreatePinnedToCore(
                             LoRaHandlerRx
@@ -1412,9 +1705,8 @@ void parsePayload() {
                             ,  8192
                             ,  NULL
                             ,  2
-                            ,  NULL
-                            ,  1);
-
+                            ,  &xLoRaHandlerRx
+                            ,  xPortGetCoreID());
                             break;
                 case 0x06 : Serial.printf("Code: PRIVATE KEY CHANGE (SERVER->METER)\n");
                             Serial.printf("Received parameters:\n");
@@ -1489,4 +1781,77 @@ void gen_iv(byte  *iv) {
 /* Setup AES */
 void setup_aes() {
   aes.set_key(key, sizeof(key)); // Get the globally defined key
+}
+
+/* Encrypt data dan aplikasi HMAC */
+void envelop_data(){
+  char data[128] = "\0";
+  char with_hmac[128] = "\0";
+  for(int i = 0; i < 50; i++)
+  {
+     data[i] = node_id[i];
+  }
+  int b64payloadlen = base64_encode(b64payload, payload, sizeof(payload));
+  Serial.print("\nb64payload: "+String(b64payload));
+  getHMAC(b64payload);
+  for(int i= 0; i< 3; i++){
+      char temp[3];
+      sprintf(temp, "%02x", (int)hmacResult[i]);
+      strcat(with_hmac,temp);
+  }
+  strcat(with_hmac,b64payload);
+  encrypt_payload(with_hmac,b64payloadlen+6);
+  strcat(data,b64data);
+
+  strcpy((char *)datasend,data);
+}
+
+/* Enkripsi data */
+void encrypt_payload(char *msg, int b64payloadlen){
+    byte cipher[1000];
+    byte iv [N_BLOCK] ;
+    char decoded[37];
+    Serial.println("Let's encrypt:");
+
+    // Our message to encrypt. Static for this example.
+    //String msg = "{\"data\":{\"value\":300}, \"SEQN\":700 , \"msg\":\"IT WORKS!!\" }";
+//    String msg = String(payload);
+    aes.set_key( key , sizeof(key));  // Get the globally defined key
+    gen_iv( my_iv );                  // Generate a random IV
+
+    // Print the IV
+    base64_encode( b64data, (char *)my_iv, N_BLOCK);
+    Serial.println(" IV b64: " + String(b64data));
+
+//    Serial.println(" Message: " + msg );
+
+    int b64len = base64_encode(b64data, (char *)msg, b64payloadlen);
+    Serial.println (" Message in B64: " + String(b64data) );
+    Serial.println (" The length is:  " + String(b64len) );
+
+    // For sanity check purpose
+//    base64_decode( decoded , b64data , b64len );
+//    Serial.printf("Decoded:\n"); printHexChar((byte *) decoded, 37);
+
+    // Encrypt! With AES128, our key and IV, CBC and pkcs7 padding
+    aes.do_aes_encrypt((byte *)b64data, b64len , cipher, key, 128, my_iv);
+
+    Serial.println("Encryption done!");
+
+    Serial.println("Cipher size: " + String(aes.get_size()));
+
+    b64len = base64_encode(b64data, (char *)cipher, aes.get_size() );
+    Serial.println ("Encrypted data in base64: " + String(b64data) );
+    Serial.println ("The length is:  " + String(b64len) );
+
+    Serial.println("Done...");
+}
+
+/* Send Data ke MQTT */
+void sendData()
+{
+     LoRa.beginPacket();
+     LoRa.print((char *)datasend);
+     LoRa.endPacket();
+     Serial.println("Packet Sent");
 }
