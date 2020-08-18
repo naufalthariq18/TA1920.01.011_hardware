@@ -73,11 +73,12 @@ unsigned char isOn;             //  Penjelasan terdapat di fungsi changeMode()
 unsigned char R_stat;           //  Penjelasan terdapat di fungsi changeMode()
 bool isNearOver = 0;            //  Bernilai 1 jika 16 A < I < 20 A (arus residensi)
 bool isKeypadOn = 0;            //  Bernilai 1 jika terdapat masukan keypad dari user
-char payload[37];               //  String payload yang akan dikirim/telah diterima (setelah enkripsi/dekrispi)
+char payload[37];               //  String payload yang telah diterima (setelah dekrispi)
 unsigned long startTimeReport;  //  Digunakan untuk perhitungan interval waktu antara pengukuran daya/tegangan/arus
 bool isTimeSync = 0;
 int counterTimeSync = 0;
 bool isFromHandlerRx = 0;
+unsigned char transmissionCode;
 
 /* VARIABEL GLOBAL TERKAIT PENGIRIMAN DATA KE SERVER */
 byte opCode_send;           //  OPCODE yang akan dikirim ke server
@@ -415,9 +416,61 @@ void ScanLoRa(void *pvParameters)
 {
     (void) pvParameters;
 
+    unsigned long timeLeftToUpdate = millis();
+    unsigned char isHandshake = 1;
+    DateTime now;
+
     for (;;)
     {
         LoRa.receive();
+
+        if(isHandshake == 1 && (millis() - timeLeftToUpdate > 10000)) {
+            Serial.printf("Rechecking time calibration\n");
+            now = rtc.now();
+            bool timeCondition = now.hour() < 24 && now.minute() < 60 && now.second() < 60 && now.day() < 32 && now.month() < 13;
+            if(timeCondition) {
+                isTimeSync = 1;
+                isHandshake = 0;
+                Serial.printf("Time calibration successful!\n");
+            } else {
+                Serial.printf("Initializing handshake with server.\n");
+                isHandshake = 2;
+                timeLeftToUpdate = millis();
+                opCode_send = 4;
+                transmissionCode = 0;
+                Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
+                xTaskCreatePinnedToCore(
+                LoRaHandlerTx
+                ,  "LoRa Handler Transmit"
+                ,  8192
+                ,  NULL
+                ,  3
+                ,  &xLoRaHandlerTx
+                ,  xPortGetCoreID());
+            }
+        } else if(isHandshake == 2 && (millis() - timeLeftToUpdate > 10000)) {
+            now = rtc.now();
+            bool timeCondition = now.hour() < 24 && now.minute() < 60 && now.second() < 60 && now.day() < 32 && now.month() < 13;
+            if(timeCondition) {
+                isTimeSync = 1;
+                isHandshake = 0;
+                Serial.printf("Handshake with server successful!\n");
+            } else {
+                Serial.printf("Handshake with server failed. Retrying.\n");
+                timeLeftToUpdate = millis();
+                opCode_send = 4;
+                transmissionCode = 0;
+                Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
+                xTaskCreatePinnedToCore(
+                LoRaHandlerTx
+                ,  "LoRa Handler Transmit"
+                ,  8192
+                ,  NULL
+                ,  3
+                ,  &xLoRaHandlerTx
+                ,  xPortGetCoreID());
+            }
+        }
 
         vTaskDelay(500);
     }
@@ -435,7 +488,6 @@ void LoRaHandlerRx(void *pvParameters) {
         Serial.printf("Time recalibrated: ");
         Serial.printf("{%02d:%02d:%02d, ", timeRec.hour, timeRec.minute, timeRec.second);
         Serial.printf("%02d-%02d-%04d}\n", timeRec.day, timeRec.month, timeRec.year.number);
-        isTimeSync = 1;
     }
 
     switch(opCode_rec) {
@@ -448,16 +500,19 @@ void LoRaHandlerRx(void *pvParameters) {
         default :       break;
     }
 
-    opCode_send = 4;
-    Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
-    xTaskCreatePinnedToCore(
-    LoRaHandlerTx
-    ,  "LoRa Handler Transmit"
-    ,  8192
-    ,  NULL
-    ,  3
-    ,  &xLoRaHandlerTx
-    ,  xPortGetCoreID());
+    if(opCode_rec != 4) {
+        opCode_send = 4;
+        transmissionCode = 0;
+        Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
+        xTaskCreatePinnedToCore(
+        LoRaHandlerTx
+        ,  "LoRa Handler Transmit"
+        ,  8192
+        ,  NULL
+        ,  3
+        ,  &xLoRaHandlerTx
+        ,  xPortGetCoreID());
+    }
 
     Serial.printf("Ending LoRaHandlerRx procedure.\n");
     vTaskDelete(NULL);
@@ -465,9 +520,14 @@ void LoRaHandlerRx(void *pvParameters) {
 
 /*  TASK: LoRaHandlerTx()
  *  Handler pembuatan payload dan pengiriman ke server
+ *
+ *  Transmission code:
+ *  0   : default
+ *  1   : Waiting for time synchronization
  */
 void LoRaHandlerTx(void *pvParameters) {
     Serial.printf("Starting LoRaHandlerTx procedure.\n");
+    unsigned char localConditionCode = transmissionCode;
 
     DateTime now = rtc.now();
 
@@ -483,15 +543,21 @@ void LoRaHandlerTx(void *pvParameters) {
         payload[1 + i] = (unsigned char) meterID_send.buffer[i];
     }
 
-    payload[5] = (unsigned char) now.day();
-    payload[6] = (unsigned char) now.month();
-    union buffer2Byte year_send;
-    year_send.number = (uint16_t) now.year();
-    payload[7] = (unsigned char) year_send.buffer[0];
-    payload[8] = (unsigned char) year_send.buffer[1];
-    payload[9] = (unsigned char) now.hour();
-    payload[10] = (unsigned char) now.minute();
-    payload[11] = (unsigned char) now.second();
+    if(isTimeSync) {
+        payload[5] = (unsigned char) now.day();
+        payload[6] = (unsigned char) now.month();
+        union buffer2Byte year_send;
+        year_send.number = (uint16_t) now.year();
+        payload[7] = (unsigned char) year_send.buffer[0];
+        payload[8] = (unsigned char) year_send.buffer[1];
+        payload[9] = (unsigned char) now.hour();
+        payload[10] = (unsigned char) now.minute();
+        payload[11] = (unsigned char) now.second();
+    } else {
+        for(unsigned char i = 5; i < 12; i++) {
+            payload[i] = 0;
+        }
+    }
 
     union buffer4Byte placeEnergy;
     placeEnergy.numberFloat = E_tot;
@@ -529,10 +595,25 @@ void LoRaHandlerTx(void *pvParameters) {
         envelop_data();
         Serial.printf("Data packet preparation finished. Sending data packet.\n");
         sendData();
-    }
 
-    vTaskDelay(5000);
-    if(xLoRaHandlerRx) vTaskResume(xLoRaHandlerRx);
+        if(localConditionCode == 1) {
+            vTaskDelay(10000);
+            now = rtc.now();
+            bool timeCondition = now.hour() < 24 && now.minute() < 60 && now.second() < 60 && now.day() < 32 && now.month() < 13;
+            if(timeCondition) {
+                isTimeSync = 1;
+                Serial.printf("Time synchronization successful!\n");
+            } else {
+                Serial.printf("Time synchronization failed. Restarting system.\n");
+                ESP.restart();
+            }
+        } else {
+            vTaskDelay(5000);
+        }
+        if(xLoRaHandlerRx) vTaskResume(xLoRaHandlerRx);
+    } else {
+        Serial.printf("Payload generation failed.\n");
+    }
 
     Serial.printf("Ending LoRaHandlerTx procedure.\n");
 
@@ -638,6 +719,7 @@ void reportEnergy() {
             opCode_send = 1;
             n_send = 2;
             R_send = 0;
+            transmissionCode = 0;
             Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
             xTaskCreatePinnedToCore(
             LoRaHandlerTx
@@ -765,6 +847,7 @@ void changeMode(int n, int r) {
         opCode_send = 1;
         n_send = 0;
         R_send = (unsigned char) r;
+        transmissionCode = 0;
         Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
         xTaskCreatePinnedToCore(
         LoRaHandlerTx
@@ -793,6 +876,7 @@ void changeMode(int n, int r) {
               opCode_send = 1;
               n_send = 1;
               R_send = (unsigned char) r;
+              transmissionCode = 0;
 
               Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
               xTaskCreatePinnedToCore(
@@ -815,6 +899,7 @@ void changeMode(int n, int r) {
             opCode_send = 1;
             n_send = 0;
             R_send = (unsigned char) r;
+            transmissionCode = 0;
             Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
             xTaskCreatePinnedToCore(
             LoRaHandlerTx
@@ -833,6 +918,7 @@ void changeMode(int n, int r) {
                 opCode_send = 1;
                 n_send = 0;
                 R_send = (unsigned char) r;
+                transmissionCode = 0;
                 Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
                 xTaskCreatePinnedToCore(
                 LoRaHandlerTx
@@ -852,6 +938,7 @@ void changeMode(int n, int r) {
                 opCode_send = 1;
                 n_send = 0;
                 R_send = (unsigned char) r;
+                transmissionCode = 0;
                 Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
                 xTaskCreatePinnedToCore(
                 LoRaHandlerTx
@@ -871,6 +958,7 @@ void changeMode(int n, int r) {
         opCode_send = 1;
         n_send = 1;
         R_send = (unsigned char) r;
+        transmissionCode = 0;
         Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
         xTaskCreatePinnedToCore(
         LoRaHandlerTx
@@ -1199,6 +1287,7 @@ void readNFC(uint8_t uid[], uint8_t uidLength) {
                 Serial.printf(" to server.\n");
 
                 opCode_send = 4;
+                transmissionCode = 0;
                 Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
                 xTaskCreatePinnedToCore(
                 LoRaHandlerTx
@@ -1244,6 +1333,17 @@ void readTime() {
         Serial.println("RTC is incorrect, recalibration with server time is needed.\n");
         isTimeSync = 0;
         counterTimeSync = 0;
+        opCode_send = 4;
+        transmissionCode = 1;
+        Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
+        xTaskCreatePinnedToCore(
+        LoRaHandlerTx
+        ,  "LoRa Handler Transmit"
+        ,  8192
+        ,  NULL
+        ,  3
+        ,  &xLoRaHandlerTx
+        ,  xPortGetCoreID());
     }
 
     Serial.printf("{%02d:%02d:%02d, ", now.hour(), now.minute(), now.second());
@@ -1387,6 +1487,7 @@ void i2c_eeprom_write_page(int deviceaddress, unsigned int eeaddresspage, byte* 
         opCode_send = 1;
         n_send = 3;
         R_send = 1;
+        transmissionCode = 0;
 
         Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
         xTaskCreatePinnedToCore(
@@ -1407,6 +1508,7 @@ void i2c_eeprom_write_page(int deviceaddress, unsigned int eeaddresspage, byte* 
         opCode_send = 1;
         n_send = 3;
         R_send = 0;
+        transmissionCode = 0;
 
         Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
         xTaskCreatePinnedToCore(
@@ -1687,6 +1789,16 @@ void parsePayload() {
                             Serial.printf("Time\t\t\t= ");
                             Serial.printf("{%02u:%02u:%02u, ", timeRec.hour, timeRec.minute, timeRec.second);
                             Serial.printf("%02u-%02u-%04u}\n", timeRec.day, timeRec.month, timeRec.year.number);
+                            Serial.print("Initializing LoRaHandlerRx at core "); Serial.println(xPortGetCoreID());
+                            // Pembuatan task baru
+                            xTaskCreatePinnedToCore(
+                            LoRaHandlerRx
+                            ,  "LoRa Handler Receive"
+                            ,  8192
+                            ,  NULL
+                            ,  2
+                            ,  &xLoRaHandlerRx
+                            ,  xPortGetCoreID());
                             break;
                 case 0x05 : Serial.printf("Code: PERUBAHAN STATUS METERAN (SERVER->METER)\n");
                             Serial.printf("Received parameters:\n");
