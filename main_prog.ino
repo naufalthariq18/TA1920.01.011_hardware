@@ -80,6 +80,7 @@ int counterTimeSync = 0;
 bool isFromHandlerRx = 0;
 unsigned char transmissionCode;
 bool isACK = 1;
+byte mock_key[16];              //  Mock key dalam pengembangan key change mechanism
 
 /* VARIABEL GLOBAL TERKAIT PENGIRIMAN DATA KE SERVER */
 byte opCode_send;           //  OPCODE yang akan dikirim ke server
@@ -173,7 +174,7 @@ void verifyCode();
 void statusPrompt();
 void readNFC(uint8_t uid[], uint8_t uidLength);
 void readTime();
-void overwriteEEPROM(float num, unsigned char cond, int mode);
+void overwriteEEPROM(char *key_write, float num, unsigned char isOn_write, unsigned char R_stat_write, int mode);
 byte i2c_eeprom_read_byte(int deviceaddress, unsigned int eeaddress);
 void i2c_eeprom_write_byte(int deviceaddress, unsigned int eeaddress, byte data);
 void i2c_eeprom_write_page(int deviceaddress, unsigned int eeaddresspage, byte* data, byte length);
@@ -189,7 +190,7 @@ void gen_iv(byte *iv);
 void setup_aes();
 void envelop_data();
 void encrypt_payload(char *msg, int b64payloadlen);
-void sendData();
+void sendData(uint8_t *datasend_buffer, bool condition);
 
 // unsigned long timeForLCD = 0;
 
@@ -232,6 +233,7 @@ void setup() {
      /* Inisialisasi kondisi LCD */
      lcd.begin(21, 22);
      lcd.backlight();
+     lcd.clear();
      Serial.printf("LCD initialization successful!\n");
 
      /* Inisialisasi konfigurasi keypad */
@@ -261,7 +263,7 @@ void setup() {
      if(isOn && R_stat != 0 && R_stat != 1) {
          isOn = 0;
          R_stat = 0;
-         overwriteEEPROM(0, isOn, R_stat, 2);
+         overwriteEEPROM(NULL, 0, isOn, R_stat, 2);
      }
 
      for(unsigned int i = 0; i < 4; i++) {
@@ -270,17 +272,40 @@ void setup() {
      E_all = convert.numberFloat;
      if(E_all < 0) {
          E_all = 0;
-         overwriteEEPROM(E_all, 0, 0, 1);
+         overwriteEEPROM(NULL, E_all, 0, 0, 1);
      }
 
      for(unsigned int i = 0; i < 4; i++) {
          convert.buffer[i] = i2c_eeprom_read_byte(0x57, i + 1);
      }
      E_tot = convert.numberFloat;
-     if(E_tot > E_all) {
+     if(E_tot >= E_all) {
          E_tot = E_all;
-         overwriteEEPROM(E_tot, 0, 0, 0);
+         overwriteEEPROM(NULL, E_tot, 0, 0, 0);
+         if(isOn) {
+             isOn = 0;
+             R_stat = 1;
+             overwriteEEPROM(NULL, 0, isOn, R_stat, 2);
+         }
+     } else if(!isOn && R_stat == 1) {
+         isOn = 1;
+         R_stat = 0;
+         overwriteEEPROM(NULL, 0, isOn, R_stat, 2);
      }
+
+     // Serial.printf("isOn = %u\n", isOn);
+     // Serial.printf("R_stat = %u\n", R_stat);
+     // Serial.printf("E_tot = %f\n", E_tot);
+     // Serial.printf("E_all = %f\n", E_all);
+
+     for(unsigned char i = 0; i < 16; i++) {
+         mock_key[i] = i2c_eeprom_read_byte(0x57, i + 9);
+     }
+
+     /* FOR DEBUGGING PURPOSES ONLY */
+     // delay(500);
+     // Serial.printf("Stored key: "); printHexChar(mock_key, sizeof(mock_key));
+     // delay(500);
 
      Serial.printf("Starting parameters are already set!\n");
 
@@ -440,6 +465,8 @@ void ScanLoRa(void *pvParameters)
         if(isHandshake == 1 && (millis() - timeLeftToUpdate > 10000)) {
             Serial.printf("Rechecking time calibration\n");
             now = rtc.now();
+            Serial.printf("{%02d:%02d:%02d, ", now.hour(), now.minute(), now.second());
+            Serial.printf("%02d-%02d-%04d} ", now.day(), now.month(), now.year());
             bool timeCondition = now.hour() < 24 && now.minute() < 60 && now.second() < 60 && now.day() < 32 && now.month() < 13;
             if(timeCondition) {
                 isTimeSync = 1;
@@ -463,6 +490,8 @@ void ScanLoRa(void *pvParameters)
             }
         } else if(isHandshake == 2 && (millis() - timeLeftToUpdate > 10000)) {
             now = rtc.now();
+            Serial.printf("{%02d:%02d:%02d, ", now.hour(), now.minute(), now.second());
+            Serial.printf("%02d-%02d-%04d} ", now.day(), now.month(), now.year());
             bool timeCondition = now.hour() < 24 && now.minute() < 60 && now.second() < 60 && now.day() < 32 && now.month() < 13;
             if(timeCondition) {
                 isTimeSync = 1;
@@ -485,24 +514,57 @@ void LoRaHandlerRx(void *pvParameters) {
     Serial.printf("Starting LoRaHandlerRx procedure.\n");
     byte local_opCode_rec = opCode_rec;
 
-    if(!isTimeSync) {
-        Serial.printf("Recalibrating time with server time.\n");
-        rtc.adjust(DateTime(timeRec.year.number, timeRec.month, timeRec.day, timeRec.hour, timeRec.minute, timeRec.second));
-        Serial.printf("Time recalibrated: ");
-        Serial.printf("{%02d:%02d:%02d, ", timeRec.hour, timeRec.minute, timeRec.second);
-        Serial.printf("%02d-%02d-%04d}\n", timeRec.day, timeRec.month, timeRec.year.number);
-    }
+    Serial.printf("Recalibrating time with server time.\n");
+    rtc.adjust(DateTime(timeRec.year.number, timeRec.month, timeRec.day, timeRec.hour, timeRec.minute, timeRec.second));
+    Serial.printf("Time recalibrated: ");
+    Serial.printf("{%02d:%02d:%02d, ", timeRec.hour, timeRec.minute, timeRec.second);
+    Serial.printf("%02d-%02d-%04d}\n", timeRec.day, timeRec.month, timeRec.year.number);
 
     switch(local_opCode_rec) {
-        case 0x04  :    isACK = 1;
+        case 0x04  :
+                        isACK = 1;
                         break;
-        case 0x05  :    readTime();
+        case 0x05  :
+                        readTime();
                         Serial.printf("Receiving [n,R] = [%u,%u] from server\n", n_rec, R_rec);
                         isFromHandlerRx = 1;
                         changeMode((int) n_rec, (int) R_rec);
                         isFromHandlerRx = 0;
                         break;
-        default :       break;
+        case 0x06  :{
+                        overwriteEEPROM(byteStream_rec, 0, 0, 0, 3);
+                        /* SOME LINES ARE FOR DEBUGGING PURPOSES ONLY */
+                        Serial.printf("Previous key: "); printHexChar(mock_key, sizeof(mock_key));
+                        for(unsigned char i = 0; i < 16; i++) {
+                            mock_key[i] = i2c_eeprom_read_byte(0x57, i + 9);
+                        }
+                        bool isSame = 1;
+                        for(unsigned char i = 0; i < 16; i++) {
+                            if(mock_key[i] != byteStream_rec[i]) {
+                                isSame = 0;
+                            }
+                        }
+                        while(!isSame) {
+                            Serial.printf("Written key is not the same. Rewriting key.\n");
+                            vTaskDelay(1000);
+                            overwriteEEPROM(byteStream_rec, 0, 0, 0, 3);
+                            for(unsigned char i = 0; i < 16; i++) {
+                                mock_key[i] = i2c_eeprom_read_byte(0x57, i + 9);
+                            }
+                            isSame = 1;
+                            for(unsigned char i = 0; i < 16; i++) {
+                                if(mock_key[i] != byteStream_rec[i]) {
+                                    isSame = 0;
+                                }
+                            }
+                        }
+                        Serial.printf("Private key change is successful!\n");
+                        Serial.printf("New key: "); printHexChar(mock_key, sizeof(mock_key));
+                        break;
+                    }
+        default :
+                        Serial.printf("This message should NOT have been printed!\n");
+                        break;
     }
 
     if(local_opCode_rec != 4) {
@@ -543,8 +605,10 @@ void LoRaHandlerTx(void *pvParameters) {
 
     unsigned char countACK = 0;
     while(!isACK && countACK < 10) {
+        Serial.printf("Counter: %u/10\n", countACK + 1);
         Serial.printf("Waiting for server acknowledgement from previous data packet.\n");
-        vTaskDelay(5000);
+        countACK++;
+        vTaskDelay(10000);
     }
 
     DateTime now = rtc.now();
@@ -673,7 +737,7 @@ void AssertACK(void *pvParameters) {
     }
 
     Serial.printf("Starting counter to wait for ACK.\n");
-    vTaskDelay(500);
+    vTaskDelay(1000);
     while(!isACK && countACK < 10) {
         if(counterLoop > 10) {
             countACK++;
@@ -685,7 +749,7 @@ void AssertACK(void *pvParameters) {
             counterLoop++;
         }
 
-        vTaskDelay(500);
+        vTaskDelay(1000);
     }
 
     if(isACK) {
@@ -739,9 +803,9 @@ void checkCondition() {
         if(isOn && E_tot > E_all) {
             changeMode(0,1);
             E_all = 0;
-            overwriteEEPROM(E_all, 1, 1, 1);
+            overwriteEEPROM(NULL, E_all, 1, 1, 1);
             E_tot = 0;
-            overwriteEEPROM(E_tot, 0, 0, 0);
+            overwriteEEPROM(NULL, E_tot, 0, 0, 0);
 
         }
     } else {
@@ -769,7 +833,7 @@ void reportEnergy() {
         if(!isnan(measuredP) && !isnan(measuredI) && measuredI < 40) {
             E_tot += measuredP * (float) (millis() - startTimeReport) / 1000;
             startTimeReport = millis();
-            overwriteEEPROM(E_tot, 0, 0, 0);
+            overwriteEEPROM(NULL, E_tot, 0, 0, 0);
         }
         if(isnan(measuredI)) {
             measuredI = 0;
@@ -799,7 +863,7 @@ void reportEnergy() {
             n_send = 2;
             R_send = 0;
             transmissionCode = 2;
-            Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
+            Serial.println("Initializing LoRaHandlerTx at core 1");
             xTaskCreatePinnedToCore(
             LoRaHandlerTx
             ,  "LoRa Handler Transmit"
@@ -807,7 +871,7 @@ void reportEnergy() {
             ,  NULL
             ,  3
             ,  &xLoRaHandlerTx
-            ,  xPortGetCoreID());
+            ,  1);
         }
     } else {
         isNearOver = 0;
@@ -850,11 +914,11 @@ void reportEnergy() {
  */
 void receiveSignal() {
     char keyEntered = keypad.getKey();
-    // if(keyEntered != NO_KEY && keyEntered == 'A') {
-    //      updatePulsa();
+    if(keyEntered != NO_KEY && keyEntered == 'A') {
+         updatePulsa();
     // } else if(keyEntered != NO_KEY && keyEntered == 'D') {
     //      statusPrompt();
-    // } else
+    } else
     if(keyEntered != NO_KEY && keyEntered == '#') {
         if(isTampered) {
             verifyRecoveryCode();
@@ -922,7 +986,7 @@ void changeMode(int n, int r) {
         isOn = 0;
         R_stat = r;
         // overwriteEEPROM(0, (isTampered << 1) | (isOn & 1), 2);
-        overwriteEEPROM(0, isOn, R_stat, 2);
+        overwriteEEPROM(NULL, 0, isOn, R_stat, 2);
         digitalWrite(ssr, LOW);
         readTime();
         Serial.printf("Sending [n,R] = [0,%d] to server\n", r);
@@ -931,7 +995,7 @@ void changeMode(int n, int r) {
         n_send = 0;
         R_send = (unsigned char) r;
         transmissionCode = 2;
-        Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
+        Serial.println("Initializing LoRaHandlerTx at core 1");
         xTaskCreatePinnedToCore(
         LoRaHandlerTx
         ,  "LoRa Handler Transmit"
@@ -939,7 +1003,7 @@ void changeMode(int n, int r) {
         ,  NULL
         ,  3
         ,  &xLoRaHandlerTx
-        ,  xPortGetCoreID());
+        ,  1);
         if(isFromHandlerRx) vTaskSuspend(NULL);
     } else if(n == 1 && !isOn) {
         bool statement = (!r && R_stat != 3) || (r == 1);
@@ -947,7 +1011,8 @@ void changeMode(int n, int r) {
               isOn = 1;
               // overwriteEEPROM(0, (isTampered << 1) | (isOn & 1), 2);
               R_stat = r;
-              overwriteEEPROM(0, isOn, R_stat, 2);
+              overwriteEEPROM(NULL, 0, isOn, R_stat, 2);
+              (0, isOn, R_stat, 2);
               if(!isTampered) {
                   digitalWrite(ssr, HIGH);
                   startTimeReport = millis();
@@ -961,7 +1026,7 @@ void changeMode(int n, int r) {
               R_send = (unsigned char) r;
               transmissionCode = 2;
 
-              Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
+              Serial.println("Initializing LoRaHandlerTx at core 1");
               xTaskCreatePinnedToCore(
               LoRaHandlerTx
               ,  "LoRa Handler Transmit"
@@ -969,13 +1034,13 @@ void changeMode(int n, int r) {
               ,  NULL
               ,  3
               ,  &xLoRaHandlerTx
-              ,  xPortGetCoreID());
+              ,  1);
               if(isFromHandlerRx) vTaskSuspend(NULL);
         }
     } else if(!n && !isOn) {
         if(r == 1 || r == 3) {
             R_stat = r;
-            overwriteEEPROM(0, isOn, R_stat, 2);
+            overwriteEEPROM(NULL, 0, isOn, R_stat, 2);
             readTime();
             Serial.printf("Sending [n,R] = [0,%d] to server\n", r);
             /* Kirim kode [n,R] = [0,R] ke server */
@@ -983,7 +1048,7 @@ void changeMode(int n, int r) {
             n_send = 0;
             R_send = (unsigned char) r;
             transmissionCode = 2;
-            Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
+            Serial.println("Initializing LoRaHandlerTx at core 1");
             xTaskCreatePinnedToCore(
             LoRaHandlerTx
             ,  "LoRa Handler Transmit"
@@ -991,7 +1056,7 @@ void changeMode(int n, int r) {
             ,  NULL
             ,  3
             ,  &xLoRaHandlerTx
-            ,  xPortGetCoreID());
+            ,  1);
             if(isFromHandlerRx) vTaskSuspend(NULL);
         } else if(!r) {
             if(R_stat == 3) {
@@ -1002,7 +1067,7 @@ void changeMode(int n, int r) {
                 n_send = 0;
                 R_send = (unsigned char) r;
                 transmissionCode = 2;
-                Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
+                Serial.println("Initializing LoRaHandlerTx at core 1");
                 xTaskCreatePinnedToCore(
                 LoRaHandlerTx
                 ,  "LoRa Handler Transmit"
@@ -1010,11 +1075,11 @@ void changeMode(int n, int r) {
                 ,  NULL
                 ,  3
                 ,  &xLoRaHandlerTx
-                ,  xPortGetCoreID());
+                ,  1);
                 if(isFromHandlerRx) vTaskSuspend(NULL);
             } else {
                 R_stat = r;
-                overwriteEEPROM(0, isOn, R_stat, 2);
+                overwriteEEPROM(NULL, 0, isOn, R_stat, 2);
                 readTime();
                 Serial.printf("Sending [n,R] = [0,%d] to server\n", r);
                 /* Kirim kode [n,R] = [0,R] ke server */
@@ -1022,7 +1087,7 @@ void changeMode(int n, int r) {
                 n_send = 0;
                 R_send = (unsigned char) r;
                 transmissionCode = 2;
-                Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
+                Serial.println("Initializing LoRaHandlerTx at core 1");
                 xTaskCreatePinnedToCore(
                 LoRaHandlerTx
                 ,  "LoRa Handler Transmit"
@@ -1030,7 +1095,7 @@ void changeMode(int n, int r) {
                 ,  NULL
                 ,  3
                 ,  &xLoRaHandlerTx
-                ,  xPortGetCoreID());
+                ,  1);
                 if(isFromHandlerRx) vTaskSuspend(NULL);
             }
         }
@@ -1042,7 +1107,7 @@ void changeMode(int n, int r) {
         n_send = 1;
         R_send = (unsigned char) r;
         transmissionCode = 2;
-        Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
+        Serial.println("Initializing LoRaHandlerTx at core 1");
         xTaskCreatePinnedToCore(
         LoRaHandlerTx
         ,  "LoRa Handler Transmit"
@@ -1050,7 +1115,7 @@ void changeMode(int n, int r) {
         ,  NULL
         ,  3
         ,  &xLoRaHandlerTx
-        ,  xPortGetCoreID());
+        ,  1);
         vTaskSuspend(NULL);
     }
 }
@@ -1120,9 +1185,9 @@ void updatePulsa() {
     }
     /* DN: something weird happened here */
     E_all = E_all_updated;
-    overwriteEEPROM(E_all, 0, 1, 1);
+    overwriteEEPROM(NULL, E_all, 0, 1, 1);
     E_tot = 0;
-    overwriteEEPROM(E_tot, 0, 0, 0);
+    overwriteEEPROM(NULL, E_tot, 0, 0, 0);
 
     isKeypadOn = 0;
 }
@@ -1221,7 +1286,7 @@ void verifyCode() {
                 case 3  : E_all += 50000; break;
                 case 4  : E_all += 100000; break;
             }
-            overwriteEEPROM(E_all, 0, 1, 1);
+            overwriteEEPROM(NULL, E_all, 0, 1, 1);
             isMatch = 1;
         }
         ref += SCRTCD;
@@ -1385,7 +1450,7 @@ void readNFC(uint8_t uid[], uint8_t uidLength) {
 
                 /* THIS IS NOT SUPPOSED TO HAPPEN, WRITTEN HERE FOR EASIER HARDWARE DEBUGGING */
                 E_all += 100000;
-                overwriteEEPROM(E_all, 0, 1, 1);
+                overwriteEEPROM(NULL, E_all, 0, 1, 1);
                 changeMode(1, 0);
             } else {
                 Serial.printf("Cannot read NFC data contents.\n");
@@ -1446,47 +1511,67 @@ void readTime() {
  *          0: E_tot hendak disimpan, isOn dan R_stat bersifat don't care
  *          1: E_all hendak disimpan, isOn dan R_stat bersifat don't care
  *          2: isOn dan R_stat hendak disimpan, num bersifat don't care
+ *          3: key_write hendak disimpan. num, usOn, R_stat bersifat don't care.
  */
-void overwriteEEPROM(float num, unsigned char isOn_write, unsigned char R_stat_write, int mode) {
+void overwriteEEPROM(char *key_write, float num, unsigned char isOn_write, unsigned char R_stat_write, int mode) {
     byte b;
+    byte key_buffer[16];
     switch (mode) {
         case 0:
-                for(unsigned int i = 0; i < 4; i++) {
-                    convert.buffer[i] = i2c_eeprom_read_byte(0x57, i + 1);
-                }
-                // Representasi biner kedua bilangan tersebut harus beda agar diubah
-                if(num != convert.numberFloat) {
-                    convert.numberFloat = num;
-                    i2c_eeprom_write_page(0x57, 1, (byte *) convert.buffer, sizeof(convert.buffer));
-                }
-                break;
+                    for(unsigned int i = 0; i < 4; i++) {
+                        convert.buffer[i] = i2c_eeprom_read_byte(0x57, i + 1);
+                    }
+                    // Representasi biner kedua bilangan tersebut harus beda agar diubah
+                    if(num != convert.numberFloat) {
+                        convert.numberFloat = num;
+                        i2c_eeprom_write_page(0x57, 1, (byte *) convert.buffer, sizeof(convert.buffer));
+                    } else {
+                        Serial.printf("EEPROM data is the same!\n");
+                    }
+                    break;
         case 1:
-                for(unsigned int i = 0; i < 4; i++) {
-                    convert.buffer[i] = i2c_eeprom_read_byte(0x57, i + 5);
+                    for(unsigned int i = 0; i < 4; i++) {
+                        convert.buffer[i] = i2c_eeprom_read_byte(0x57, i + 5);
+                    }
+                    // Representasi biner kedua bilangan tersebut harus beda agar diubah
+                    if(num != convert.numberFloat) {
+                        convert.numberFloat = num;
+                        i2c_eeprom_write_page(0x57, 5, (byte *) convert.buffer, sizeof(convert.buffer));
+                    } else {
+                        Serial.printf("EEPROM data is the same!\n");
+                    }
+                    break;
+        case 2: {
+                    b = i2c_eeprom_read_byte(0x57, 0);
+                    byte writeByte = 0x00;
+                    writeByte |= isOn_write;
+                    writeByte = (writeByte << 2) | R_stat_write;
+                    if(writeByte != b) {
+                        i2c_eeprom_write_byte(0x57, 0, writeByte);
+                    } else {
+                        Serial.printf("EEPROM data is the same!\n");
+                    }
+                    break;
                 }
-                // Representasi biner kedua bilangan tersebut harus beda agar diubah
-                if(num != convert.numberFloat) {
-                    convert.numberFloat = num;
-                    i2c_eeprom_write_page(0x57, 5, (byte *) convert.buffer, sizeof(convert.buffer));
-                }
-                break;
-        case 2:
-                b = i2c_eeprom_read_byte(0x57, 0);
-                byte writeByte = 0x00;
-                writeByte |= isOn_write;
-                writeByte = (writeByte << 2) | R_stat_write;
-                if(writeByte != b) {
-                    i2c_eeprom_write_byte(0x57, 0, writeByte);
-                }
-                break;
+        case 3:
+                    for(unsigned int i = 0; i < 16; i++) {
+                        key_buffer[i] = i2c_eeprom_read_byte(0x57, i + 9);
+                    }
+                    int sameCount = 0;
+                    for(unsigned char i = 0; i < 16; i++) {
+                        if((char) key_buffer[i] == key_write[i]) {
+                            sameCount++;
+                        }
+                    }
+                    if(sameCount < 16) {
+                        i2c_eeprom_write_page(0x57, 9, (byte *) key_write, sizeof(byteStream_rec));
+                    } else {
+                        Serial.printf("EEPROM data is the same!\n");
+                    }
+                    break;
     }
 
-    unsigned long currentTime = millis();
-    while((millis() - currentTime) < 100) {
-        if(interruptCounter > 0) {
-            interruptHandler();
-        }
-    }
+    vTaskDelay(200);
 }
 
 /*  i2c_eeprom_read_byte()
@@ -1884,13 +1969,16 @@ void parsePayload() {
 
         if(meterID_rec.numberLong == SCRTCD) {
             switch(opCode_rec) {
-                case 0x00 : Serial.printf("Code: NULL - no state parameters will be changed\n");
+                case 0x00 :
+                            Serial.printf("Code: NULL - no state parameters will be changed\n");
                             break;
                 case 0x01 :
                 case 0x02 :
-                case 0x03 : Serial.printf("Invalid opcode, should be used for endpoint to server transmission!\n");
+                case 0x03 :
+                            Serial.printf("Invalid opcode, should be used for endpoint to server transmission!\n");
                             break;
-                case 0x04 : Serial.printf("Code: ACKNOWLEDGEMENT\n");
+                case 0x04 :
+                            Serial.printf("Code: ACKNOWLEDGEMENT\n");
                             Serial.printf("Received parameters:\n");
                             Serial.printf("Opcode\t\t\t= "); printHexChar(&opCode_rec, sizeof(opCode_rec));
                             Serial.printf("Meter ID\t\t= %lu\n", meterID_rec.numberLong);
@@ -1908,7 +1996,8 @@ void parsePayload() {
                             ,  &xLoRaHandlerRx
                             ,  xPortGetCoreID());
                             break;
-                case 0x05 : Serial.printf("Code: PERUBAHAN STATUS METERAN (SERVER->METER)\n");
+                case 0x05 :
+                            Serial.printf("Code: PERUBAHAN STATUS METERAN (SERVER->METER)\n");
                             Serial.printf("Received parameters:\n");
                             Serial.printf("Opcode\t\t\t= "); printHexChar(&opCode_rec, sizeof(opCode_rec));
                             Serial.printf("n\t\t\t= %u\n", n_rec);
@@ -1928,7 +2017,8 @@ void parsePayload() {
                             ,  &xLoRaHandlerRx
                             ,  xPortGetCoreID());
                             break;
-                case 0x06 : Serial.printf("Code: PRIVATE KEY CHANGE (SERVER->METER)\n");
+                case 0x06 :
+                            Serial.printf("Code: PRIVATE KEY CHANGE (SERVER->METER)\n");
                             Serial.printf("Received parameters:\n");
                             Serial.printf("Opcode\t\t\t= "); printHexChar(&opCode_rec, sizeof(opCode_rec));
                             Serial.printf("Meter ID\t\t= %lu\n", meterID_rec.numberLong);
@@ -1936,8 +2026,19 @@ void parsePayload() {
                             Serial.printf("{%02u:%02u:%02u, ", timeRec.hour, timeRec.minute, timeRec.second);
                             Serial.printf("%02u-%02u-%04u}\n", timeRec.day, timeRec.month, timeRec.year.number);
                             Serial.printf("New Key\t\t= "); printHexChar((byte *) byteStream_rec, sizeof(byteStream_rec));
+                            Serial.print("Initializing LoRaHandlerRx at core "); Serial.println(xPortGetCoreID());
+                            // Pembuatan task baru
+                            xTaskCreatePinnedToCore(
+                            LoRaHandlerRx
+                            ,  "LoRa Handler Receive"
+                            ,  8192
+                            ,  NULL
+                            ,  2
+                            ,  &xLoRaHandlerRx
+                            ,  xPortGetCoreID());
                             break;
-                case 0x07 : Serial.printf("Code: TRIGGER PELAPORAN KONSUMSI ENERGI (SERVER->METER)\n");
+                case 0x07 :
+                            Serial.printf("Code: TRIGGER PELAPORAN KONSUMSI ENERGI (SERVER->METER)\n");
                             Serial.printf("Received parameters:\n");
                             Serial.printf("Opcode\t\t\t= "); printHexChar(&opCode_rec, sizeof(opCode_rec));
                             Serial.printf("Meter ID\t\t= %lu\n", meterID_rec.numberLong);
@@ -1945,7 +2046,8 @@ void parsePayload() {
                             Serial.printf("{%02u:%02u:%02u, ", timeRec.hour, timeRec.minute, timeRec.second);
                             Serial.printf("%02u-%02u-%04u}\n", timeRec.day, timeRec.month, timeRec.year.number);
                             break;
-                case 0x08 : Serial.printf("Code: UPDATE ALLOCATION (SERVER->METER)\n");
+                case 0x08 :
+                            Serial.printf("Code: UPDATE ALLOCATION (SERVER->METER)\n");
                             Serial.printf("Received parameters:\n");
                             Serial.printf("Opcode\t\t\t= "); printHexChar(&opCode_rec, sizeof(opCode_rec));
                             Serial.printf("Meter ID\t\t= %lu\n", meterID_rec.numberLong);
@@ -1954,7 +2056,8 @@ void parsePayload() {
                             Serial.printf("%02u-%02u-%04u}\n", timeRec.day, timeRec.month, timeRec.year.number);
                             Serial.printf("Added energy\t= %f\n", E_all_rec.numberFloat);
                             break;
-                default :   Serial.printf("Code: INVALID OPCODE\n");
+                default :
+                            Serial.printf("Code: INVALID OPCODE\n");
             }
         } else {
             Serial.printf("Payload not intended for this endpoint.\n");
@@ -2078,14 +2181,12 @@ void encrypt_payload(char *msg, int b64payloadlen){
  */
 void sendData(uint8_t *datasend_buffer, bool condition)
 {
-     LoRa.beginPacket();
-
-     if(condition) {
-         LoRa.print((char *) datasend_buffer);
-     } else {
-         LoRa.print((char *) datasend);
-     }
-
-     LoRa.endPacket();
-     Serial.println("Packet Sent");
+    LoRa.beginPacket();
+    if(condition) {
+        LoRa.print((char *) datasend_buffer);
+    } else {
+        LoRa.print((char *) datasend);
+    }
+    LoRa.endPacket();
+    Serial.println("Packet Sent");
 }
