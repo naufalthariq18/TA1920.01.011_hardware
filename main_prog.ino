@@ -38,7 +38,7 @@ TaskHandle_t xLoRaHandlerRx = NULL;
 #define PN532_MOSI  (25)
 #define PN532_SS    (5)
 
-/* SECRET CODE METERAN (JANGAN DIUBAH, SANGAT SENSITIF) */
+/* IDENTIFICATION CODE METERAN (JANGAN DIUBAH, SANGAT SENSITIF) */
 #define SCRTCD 3159
 #define SCRTRC 428954425
 
@@ -67,9 +67,9 @@ union buffer4Byte convert;
 union buffer2Byte convert2;
 
 /* VARIABEL GLOBAL METERAN SECARA UMUM*/
-float E_tot;                    //  Penggunaan energi residensi terukur
+float E_tot;                    //  Konsumsi energi residensi terukur
 float E_all;                    //  Alokasi energi untuk residensi
-unsigned long startTimeReport;  //  Digunakan untuk perhitungan interval waktu antara pengukuran daya/tegangan/arus
+unsigned long startTimeReport;  //  Digunakan untuk perhitungan interval waktu antara pengukuran sampel daya/tegangan/arus
 bool isNearOver = 0;            //  Bernilai 1 jika 16 A < I < 20 A (arus residensi)
 unsigned char isOn;             //  Penjelasan terdapat di fungsi changeMode()
 unsigned char R_stat;           //  Penjelasan terdapat di fungsi changeMode()
@@ -183,7 +183,6 @@ int extractDigit(int n);
 void verifyCode();
 void statusPrompt();
 void readNFC(uint8_t uid[], uint8_t uidLength);
-void readTime();
 void overwriteEEPROM(char *key_write, float num, unsigned char isOn_write, unsigned char R_stat_write, int mode);
 byte i2c_eeprom_read_byte(int deviceaddress, unsigned int eeaddress);
 void i2c_eeprom_write_byte(int deviceaddress, unsigned int eeaddress, byte data);
@@ -202,12 +201,11 @@ void envelop_data();
 void encrypt_payload(char *msg, int b64payloadlen);
 void sendData(uint8_t *datasend_buffer, bool condition);
 
-// unsigned long timeForLCD = 0;
-
  /* SETUP AWAL */
 void setup() {
 
      delay(3000);
+
      /* Inisialisasi Serial Communication */
      Serial.begin(115200);
      Serial2.begin(9600, SERIAL_8N1, 16, 17);
@@ -492,8 +490,6 @@ void ScanLoRa(void *pvParameters)
     bool check = 1;
     bool check1 = 1;
     bool check2 = 1;
-    // unsigned char isHandshake = 1;
-    // DateTime now;
 
     for (;;)
     {
@@ -503,8 +499,6 @@ void ScanLoRa(void *pvParameters)
             if(check && !xLoRaHandlerRx) {
                 if(packet_opcode == 0 && packet_condition) {
                     Serial.print("Initializing ReportEnergy at core 1\n");
-                    isReportEnergy = 1;
-                    isLCDChanged = 1;
                     // Pembuatan task baru
                     xTaskCreatePinnedToCore(
                         ReportEnergy
@@ -518,7 +512,6 @@ void ScanLoRa(void *pvParameters)
                 } else if(packet_opcode == 1){
                     if(packet_condition == 2) {
                         if(check2) {
-                            // readTime();
                             Serial.printf("Sending [n,R] = [%d,%d] to server\n", isOn, R_stat);
 
                             opCode_send = 1;
@@ -580,47 +573,6 @@ void ScanLoRa(void *pvParameters)
             }
         }
 
-        // if(isHandshake == 1 && (millis() - timeLeftToUpdate > 10000)) {
-        //     Serial.printf("Rechecking time calibration\n");
-        //     now = rtc.now();
-        //     Serial.printf("{%02d:%02d:%02d, ", now.hour(), now.minute(), now.second());
-        //     Serial.printf("%02d-%02d-%04d} ", now.day(), now.month(), now.year());
-        //     bool timeCondition = now.hour() < 24 && now.minute() < 60 && now.second() < 60 && now.day() < 32 && now.month() < 13;
-        //     if(timeCondition) {
-        //         isTimeSync = 1;
-        //         isHandshake = 0;
-        //         Serial.printf("Time calibration successful!\n");
-        //     } else {
-        //         Serial.printf("Initializing handshake with server.\n");
-        //         isHandshake = 2;
-        //         timeLeftToUpdate = millis();
-        //         opCode_send = 4;
-        //         transmissionCode = 2;
-        //         Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
-        //         xTaskCreatePinnedToCore(
-        //         LoRaHandlerTx
-        //         ,  "LoRa Handler Transmit"
-        //         ,  8192
-        //         ,  NULL
-        //         ,  3
-        //         ,  &xLoRaHandlerTx
-        //         ,  xPortGetCoreID());
-        //     }
-        // } else if(isHandshake == 2 && (millis() - timeLeftToUpdate > 10000)) {
-        //     now = rtc.now();
-        //     Serial.printf("{%02d:%02d:%02d, ", now.hour(), now.minute(), now.second());
-        //     Serial.printf("%02d-%02d-%04d} ", now.day(), now.month(), now.year());
-        //     bool timeCondition = now.hour() < 24 && now.minute() < 60 && now.second() < 60 && now.day() < 32 && now.month() < 13;
-        //     if(timeCondition) {
-        //         isTimeSync = 1;
-        //         isHandshake = 0;
-        //         Serial.printf("Handshake with server successful!\n");
-        //     } else {
-        //         Serial.printf("Handshake with server failed. Retrying.\n");
-        //         timeLeftToUpdate = millis();
-        //     }
-        // }
-
         vTaskDelay(500);
     }
 }
@@ -660,7 +612,6 @@ void LoRaHandlerRx(void *pvParameters) {
                         }
                         break;
         case 0x05  :{
-                        // readTime();
                         Serial.printf("Receiving [n,R] = [%u,%u] from server\n", n_rec, R_rec);
                         bool condition = !(packet_opcode == 1 && (packet_condition == 1 || packet_condition == 0) && n_rec == isOn && R_rec == R_stat);
                         if(condition) {
@@ -710,18 +661,6 @@ void LoRaHandlerRx(void *pvParameters) {
                         if(!((!packet_opcode && packet_condition == 1) || (!packet_opcode && packet_condition == 2))) {
                             uint16_t packet_time_rec = (uint16_t) (timeRec.minute * 60 + timeRec.second);
                             if(packet_time != packet_time_rec) {
-                                Serial.printf("Waiting for energy report update from server.\n");
-                                vTaskDelay(100);
-                                DateTime now = rtc.now();
-                                uint16_t secondNow = (uint16_t) (now.minute() * 60 + now.second());
-                                while((secondNow - packet_time) % 3600 < 250) {
-                                    vTaskDelay(20000);
-                                    now = rtc.now();
-                                    secondNow = (uint16_t) (now.minute() * 60 + now.second());
-                                }
-                                Serial.printf("Energy report (from server) has been updated.\n");
-                                isReportEnergy = 1;
-                                isLCDChanged = 1;
                                 packet_opcode = 0;
                                 packet_condition = 2;
                                 packet_time = packet_time_rec;
@@ -755,7 +694,7 @@ void LoRaHandlerRx(void *pvParameters) {
                         break;
     }
 
-    if(needACK) {
+    if(needACK && !isReportEnergy) {
         vTaskDelay(10000);
         if(packet_opcode == 1 && packet_condition == 2) {
             while(packet_condition == 2) {
@@ -774,9 +713,6 @@ void LoRaHandlerRx(void *pvParameters) {
         ,  &xLoRaHandlerTx
         ,  xPortGetCoreID());
     }
-
-    // Resetting LCD
-    // lcd.begin(21, 22);
 
     Serial.printf("Ending LoRaHandlerRx procedure.\n");
     vTaskDelete(NULL);
@@ -800,6 +736,11 @@ void LoRaHandlerTx(void *pvParameters) {
     unsigned char first_send;
     float E_tot_send = E_tot;
     float E_all_send = E_all;
+
+    if(local_opCode_send == 3) {
+        isReportEnergy = 1;
+        isLCDChanged = 1;
+    }
 
     unsigned char countACK = 0;
     while(!isACK && countACK < 10) {
@@ -899,7 +840,6 @@ void LoRaHandlerTx(void *pvParameters) {
         envelop_data();
         Serial.printf("Data packet preparation finished. Sending data packet.\n");
         sendData(NULL, 0);
-        lcd.begin(21, 22);
         isACK = 0;
 
         if(localConditionCode == 1) {
@@ -931,9 +871,6 @@ void LoRaHandlerTx(void *pvParameters) {
     } else {
         Serial.printf("Payload generation failed.\n");
     }
-
-    // Resetting LCD
-    // lcd.begin(21, 22);
 
     Serial.printf("Ending LoRaHandlerTx procedure.\n");
 
@@ -990,11 +927,22 @@ void AssertACK(void *pvParameters) {
  */
 void ReportEnergy(void *pvParameters) {
     Serial.printf("Starting ReportEnergy procedure.\n");
-    isReportEnergy = 1;
-    isLCDChanged = 1;
 
     if(packet_condition == 2) {
-        // readTime();
+        opCode_send = 4;
+        transmissionCode = 2;
+        Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
+        xTaskCreatePinnedToCore(
+        LoRaHandlerTx
+        ,  "LoRa Handler Transmit"
+        ,  8192
+        ,  NULL
+        ,  3
+        ,  &xLoRaHandlerTx
+        ,  xPortGetCoreID());
+
+        vTaskDelay(10000);
+
         Serial.printf("Sending E_tot = %.2f and E_all = %.2f to server\n", E_tot, E_all);
 
         opCode_send = 3;
@@ -1047,17 +995,7 @@ void ReportEnergy(void *pvParameters) {
             vTaskDelay(3000);
             isKeypadOn = 0;
         }
-        // Serial.printf("Energy readjustment successful!\n");
     }
-
-    // for(unsigned char i = 0; i < 2; i++) {
-    //     convert2.buffer[i] = i2c_eeprom_read_byte(0x57, i + 25);
-    // }
-    // uint16_t raw2_timePacket = convert2.number;
-    // packet_time = raw2_timePacket & 4095;
-    // packet_condition = (raw2_timePacket >> 12);
-    // Serial.printf("Stored time: %u:%u\n", packet_time / 60, packet_time % 60);
-    // Serial.printf("Stored condition: %u\n", packet_condition);
 
     isReportEnergy = 0;
     Serial.printf("Ending ReportEnergy procedure.\n");
@@ -1102,9 +1040,6 @@ void checkCondition() {
     if(!isTampered && !state) {
         if(isOn && E_tot > E_all) {
             changeMode(0,1);
-            // E_all = 0;
-            // vTaskDelay(100);
-            // overwriteEEPROM(NULL, E_all, 1, 1, 1);
             E_tot = E_all;
             vTaskDelay(100);
             overwriteEEPROM(NULL, E_tot, 0, 0, 0);
@@ -1159,7 +1094,6 @@ void measureEnergy() {
         if(!isNearOver) {
             isNearOver = 1;
             /* SEND WARNING */
-            // readTime();
             Serial.printf("Sending [n,R] = [1,2] to server\n");
             /* Kirim kode [n,R] = [2,0] ke server */
             opCode_send = 1;
@@ -1184,8 +1118,6 @@ void measureEnergy() {
     if(!isKeypadOn) {
         Serial.printf("isTampered = %d\tisOn = %d\tR_stat = %d\tE_all = %.2f\tE_tot = %.2f\tE_sisa = %.2f\tI = %.2f\tV = %.2f\n",
                         isTampered, isOn, R_stat, E_all, E_tot, E_all - E_tot, measuredI, measuredV);
-        // Serial.printf("Delay from finishing keypad to starting LCD: %lu ms\n", millis() - timeForLCD);
-        // timeForLCD = millis();
         if(!isTampered) {
             if(isReportEnergy) {
                 if(isLCDChanged) {
@@ -1209,16 +1141,7 @@ void measureEnergy() {
             lcd.setCursor(0,1); lcd.print("TERDETEKSI!");
             isLCDChanged = 0;
         }
-        // Serial.printf("LCD written in: %lu ms\n", millis() - timeForLCD);
     }
-
-    if(counterTimeSync > 300) {
-        lcd.begin(21, 22);
-        counterTimeSync = 0;
-    } else {
-        counterTimeSync++;
-    }
-
 }
 
 /*  receiveSignal()
@@ -1232,6 +1155,10 @@ void receiveSignal() {
          updatePulsa();
     // } else if(keyEntered != NO_KEY && keyEntered == 'D') {
     //      statusPrompt();
+    } else
+    if(keyEntered != NO_KEY && keyEntered == 'C') {
+         packet_condition = 0;
+         overwriteEEPROM(NULL, 0, 0, 0, 4);
     } else
     if(keyEntered != NO_KEY && keyEntered == '#') {
         if(isTampered) {
@@ -1300,11 +1227,9 @@ void changeMode(int n, int r) {
         isOn = 0;
         R_stat = r;
         vTaskDelay(100);
-        // overwriteEEPROM(0, (isTampered << 1) | (isOn & 1), 2);
         overwriteEEPROM(NULL, 0, isOn, R_stat, 2);
         digitalWrite(ssr, LOW);
         isLCDChanged = 1;
-        // readTime();
         Serial.printf("Sending [n,R] = [0,%d] to server\n", r);
 
         opCode_send = 1;
@@ -1325,7 +1250,6 @@ void changeMode(int n, int r) {
         bool statement = (!r && R_stat != 3) || (r == 1);
         if(statement) {
               isOn = 1;
-              // overwriteEEPROM(0, (isTampered << 1) | (isOn & 1), 2);
               R_stat = r;
               vTaskDelay(100);
               overwriteEEPROM(NULL, 0, isOn, R_stat, 2);
@@ -1334,7 +1258,6 @@ void changeMode(int n, int r) {
                   digitalWrite(ssr, HIGH);
                   startTimeReport = millis();
               }
-              // readTime();
               Serial.printf("Sending [n,R] = [1,%d] to server\n", r);
 
               /* Kirim kode [n,R] = [1,R] ke server */
@@ -1361,7 +1284,6 @@ void changeMode(int n, int r) {
             R_stat = r;
             vTaskDelay(100);
             overwriteEEPROM(NULL, 0, isOn, R_stat, 2);
-            // readTime();
             Serial.printf("Sending [n,R] = [0,%d] to server\n", r);
             /* Kirim kode [n,R] = [0,R] ke server */
             opCode_send = 1;
@@ -1380,7 +1302,6 @@ void changeMode(int n, int r) {
             if(isFromHandlerRx) vTaskSuspend(NULL);
         } else if(!r) {
             if(R_stat == 3) {
-                // readTime();
                 Serial.printf("Sending [n,R] = [0,%d] to server\n", r);
                 /* Kirim kode [n,R] = [0,R] ke server */
                 opCode_send = 1;
@@ -1401,7 +1322,6 @@ void changeMode(int n, int r) {
                 R_stat = r;
                 vTaskDelay(100);
                 overwriteEEPROM(NULL, 0, isOn, R_stat, 2);
-                // readTime();
                 Serial.printf("Sending [n,R] = [0,%d] to server\n", r);
                 /* Kirim kode [n,R] = [0,R] ke server */
                 opCode_send = 1;
@@ -1444,77 +1364,75 @@ void changeMode(int n, int r) {
 }
 
 /*  updatePulsa()
- *  Handler untuk update E_all, dipanggil jika terdapat sinyal dari server untuk
+ *  Handler simulasi (dgn keypad) untuk update E_all, dipanggil jika terdapat sinyal dari server untuk
  *  penambahan pulsa energi.
- *  NOTES: MASIH TERDAPAT KODE YANG DIIMPLEMENTASIKAN MENGGUNAKAN KEYPAD. Kode
- *         hendak dihapus setelah porting LoRa.
+ *  NOTES: HANYA UNTUK DEBUGGING SAJA
  */
 void updatePulsa() {
-    /* IMPLEMENTASI MENGGUNAKAN KEYPAD */
-    isKeypadOn = 1;
-    // readTime();
-    Serial.printf("Sending E_tot = %.2f and E_all = %.2f to server\n", E_tot, E_all);
-    /* Kirim E_tot dan E_all ke server */
-    /* Menerima E_all_updated dari server */
-    lcd.clear();
-    lcd.setCursor(0,0); lcd.print("Sisa energi:");
-    Serial.printf("Allocated energy : ");
-
-    int E_all_updated = 0;
-
-    char kpad;
-    while((kpad = keypad.getKey()) == NO_KEY) {
-        if(interruptCounter > 0) {
-            interruptHandler();
-        } else {
-            vTaskDelay(1);
-        }
-    }
-    while(keypad.getKey() != NO_KEY) {
-        if(interruptCounter > 0) {
-            interruptHandler();
-        } else {
-            vTaskDelay(1);
-        }
-    }
-    while(kpad != 'A') {
-        if(!(kpad == 'B' || kpad == 'C' || kpad == 'D' || kpad == '#' || kpad == '*')) {
-            E_all_updated = E_all_updated * 10 + kpad - 48;
-            Serial.printf("%d", kpad - 48);
-        }
-
-        setNumLCD(0,1, E_all_updated);
-        while((kpad = keypad.getKey()) == NO_KEY) {
-            if(interruptCounter > 0) {
-                interruptHandler();
-            } else {
-                vTaskDelay(1);
-            }
-        }
-        while(keypad.getKey() != NO_KEY) {
-            if(interruptCounter > 0) {
-                interruptHandler();
-            } else {
-                vTaskDelay(1);
-            }
-        }
-    }
-    Serial.printf("\n");
-
-    /* PENAMBAHAN PULSA */
-    bool statement = (E_all_updated > E_all && !((!isOn && !R_stat) || (!isOn && R_stat == 3))) || (!isOn && R_stat == 2);
-    if(statement) {
-        changeMode(1,0);
-    }
-    /* DN: something weird happened here */
-    E_all = E_all_updated;
-    vTaskDelay(100);
-    overwriteEEPROM(NULL, E_all, 0, 1, 1);
-    E_tot = 0;
-    vTaskDelay(100);
-    overwriteEEPROM(NULL, E_tot, 0, 0, 0);
-
-    isKeypadOn = 0;
+    // /* IMPLEMENTASI MENGGUNAKAN KEYPAD */
+    // isKeypadOn = 1;
+    // Serial.printf("Sending E_tot = %.2f and E_all = %.2f to server\n", E_tot, E_all);
+    // /* Kirim E_tot dan E_all ke server */
+    // /* Menerima E_all_updated dari server */
+    // lcd.clear();
+    // lcd.setCursor(0,0); lcd.print("Sisa energi:");
+    // Serial.printf("Allocated energy : ");
+    //
+    // int E_all_updated = 0;
+    //
+    // char kpad;
+    // while((kpad = keypad.getKey()) == NO_KEY) {
+    //     if(interruptCounter > 0) {
+    //         interruptHandler();
+    //     } else {
+    //         vTaskDelay(1);
+    //     }
+    // }
+    // while(keypad.getKey() != NO_KEY) {
+    //     if(interruptCounter > 0) {
+    //         interruptHandler();
+    //     } else {
+    //         vTaskDelay(1);
+    //     }
+    // }
+    // while(kpad != 'A') {
+    //     if(!(kpad == 'B' || kpad == 'C' || kpad == 'D' || kpad == '#' || kpad == '*')) {
+    //         E_all_updated = E_all_updated * 10 + kpad - 48;
+    //         Serial.printf("%d", kpad - 48);
+    //     }
+    //
+    //     setNumLCD(0,1, E_all_updated);
+    //     while((kpad = keypad.getKey()) == NO_KEY) {
+    //         if(interruptCounter > 0) {
+    //             interruptHandler();
+    //         } else {
+    //             vTaskDelay(1);
+    //         }
+    //     }
+    //     while(keypad.getKey() != NO_KEY) {
+    //         if(interruptCounter > 0) {
+    //             interruptHandler();
+    //         } else {
+    //             vTaskDelay(1);
+    //         }
+    //     }
+    // }
+    // Serial.printf("\n");
+    //
+    // /* PENAMBAHAN PULSA */
+    // bool statement = (E_all_updated > E_all && !((!isOn && !R_stat) || (!isOn && R_stat == 3))) || (!isOn && R_stat == 2);
+    // if(statement) {
+    //     changeMode(1,0);
+    // }
+    // /* Notes: something weird happened here */
+    // E_all = E_all_updated;
+    // vTaskDelay(100);
+    // overwriteEEPROM(NULL, E_all, 0, 1, 1);
+    // E_tot = 0;
+    // vTaskDelay(100);
+    // overwriteEEPROM(NULL, E_tot, 0, 0, 0);
+    //
+    // isKeypadOn = 0;
 }
 
 /*  extractDigit()
@@ -1724,7 +1642,6 @@ void statusPrompt() {
     // lcd.setCursor(0,1);
     //
     // /* HANDLER PERUBAHAN STATUS METERAN (TENTATIF) */
-    // readTime();
     // if(!(statCode[0] == 5 || statCode[1] == 5)) {
     //     Serial.printf("Receiving [n,R] = [%d,%d] from server\n", statCode[0], statCode[1]);
     //     lcd.print("Status received!");
@@ -1772,11 +1689,8 @@ void readNFC(uint8_t uid[], uint8_t uidLength) {
             if(success) {
                 vTaskSuspend(xScanKeypad);
                 lcd.print("NFC berhasil!   ");
-                // lcd.setCursor(0,1);
-                // lcd.print("+100000");
                 vTaskResume(xScanKeypad);
 
-                // readTime();
                 Serial.printf("Sending NFC code ");
                 for(uint8_t i = 0; i < 16; i++) {
                     if(data[i] <= 0xF) {
@@ -1803,14 +1717,6 @@ void readNFC(uint8_t uid[], uint8_t uidLength) {
                 ,  3
                 ,  &xLoRaHandlerTx
                 ,  xPortGetCoreID());
-
-                /* ADD ENERGY ACCORDING TO THE CARD, SEND TO SERVER */
-
-                /* THIS IS NOT SUPPOSED TO HAPPEN, WRITTEN HERE FOR EASIER HARDWARE DEBUGGING */
-                // E_all += 100000;
-                // vTaskDelay(100);
-                // overwriteEEPROM(NULL, E_all, 0, 1, 1);
-                // changeMode(1, 0);
             } else {
                 Serial.printf("Cannot read NFC data contents.\n");
                 lcd.print("NFC gagal dibaca");
@@ -1826,38 +1732,6 @@ void readNFC(uint8_t uid[], uint8_t uidLength) {
 
     vTaskDelay(3000);
     isKeypadOn = 0;
-}
-
-/*  readTime()
- *  Pembacaan waktu saat pemanggilan fungsi dari RTC.
- *  NOTES: Untuk sementara digunakan untuk print di console.
- */
-void readTime() {
-    vTaskDelay(100);
-    DateTime now = rtc.now();
-
-    // bool timeCondition = now.hour() < 24 && now.minute() < 60 && now.second() < 60 && now.day() < 32 && now.month() < 13;
-    // if(!timeCondition) {
-    //     Serial.println("RTC is incorrect, recalibration with server time is needed.\n");
-    //     isTimeSync = 0;
-    //     counterTimeSync = 0;
-    //     if(!xLoRaHandlerRx && !xLoRaHandlerTx) {
-    //         opCode_send = 4;
-    //         transmissionCode = 1;
-    //         Serial.print("Initializing LoRaHandlerTx at core "); Serial.println(xPortGetCoreID());
-    //         xTaskCreatePinnedToCore(
-    //         LoRaHandlerTx
-    //         ,  "LoRa Handler Transmit"
-    //         ,  8192
-    //         ,  NULL
-    //         ,  3
-    //         ,  &xLoRaHandlerTx
-    //         ,  xPortGetCoreID());
-    //     }
-    // }
-
-    Serial.printf("{%02d:%02d:%02d, ", now.hour(), now.minute(), now.second());
-    Serial.printf("%02d-%02d-%04d} ", now.day(), now.month(), now.year());
 }
 
 /*  overwriteEEPROM()
@@ -2097,7 +1971,7 @@ void i2c_eeprom_write_page(int deviceaddress, unsigned int eeaddresspage, byte* 
     }
 }
 
-/*  verifyCode()
+/*  verifyRecoveryCode()
  *  Verifikasi recovery code yang dimasukkan pada keypad dengan recovery code
  *  yang benar. Tampering mechanism akan dimatikan jika recovery code yang
  *  dimasukkan benar.
