@@ -743,7 +743,7 @@ void LoRaHandlerTx(void *pvParameters) {
     }
 
     unsigned char countACK = 0;
-    while(!isACK && countACK < 10) {
+    while(!isACK && countACK < 20) {
         Serial.printf("Counter: %u/10\n", countACK + 1);
         Serial.printf("Waiting for server acknowledgement from previous data packet.\n");
         countACK++;
@@ -895,8 +895,8 @@ void AssertACK(void *pvParameters) {
 
     Serial.printf("Starting counter to wait for ACK.\n");
     vTaskDelay(1000);
-    while(!isACK && countACK < 10) {
-        if(counterLoop > 10) {
+    while(!isACK && countACK < 20) {
+        if(counterLoop > 15) {
             countACK++;
             Serial.printf("Counter: %u/10\n", countACK);
             Serial.println("Resending data packet: " + String((char *) datasend_buffer));
